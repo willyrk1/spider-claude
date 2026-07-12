@@ -1,18 +1,19 @@
-//! Two-phase solver that returns a *short* solution.
+//! Solver that returns a *short* solution.
 //!
 //! A plain DFS finds *a* solution fast, but it's a long, meandering path — DFS
-//! never seeks short paths, and a depth cap alone gives the search no guidance.
-//! Short solutions need a heuristic that estimates "distance to the goal" so the
-//! search heads toward it. So:
+//! never seeks short paths. Short solutions (and the best shot at hard deals)
+//! need a heuristic that estimates "distance to the goal" so the search heads
+//! toward it. So:
 //!
-//!   - **Phase 1** runs a plain depth-first search to find *a* solution quickly
-//!     (the old reliable behavior). This guarantees an answer for solvable
-//!     deals — no regression — and is kept as a fallback.
-//!   - **Phase 2** runs a weighted-A\* search ordered by `g + W*h`, where `g` is
+//!   - **Primary** is a weighted-A\* search ordered by `g + w*h`, where `g` is
 //!     moves made and `h` estimates moves remaining. It explores far fewer,
-//!     far more purposeful states and returns a much shorter solution.
+//!     far more purposeful states and returns a much shorter solution — and on
+//!     hard deals it's the search most likely to find a win at all.
+//!   - **Fallback** is a plain make/undo DFS. It only runs if A\* fails, so a
+//!     solvable easy deal always gets *an* answer even if A\* ran out of budget.
 //!
-//! Both phases share one node budget, and the shorter of the two results wins.
+//! A\* runs first with the full budget; the DFS fallback gets its own budget
+//! only when A\* comes up empty.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet};
@@ -20,16 +21,21 @@ use std::collections::{BinaryHeap, HashSet};
 use crate::board::{Board, Move, COLS};
 use crate::card::{rank, suit};
 
-/// Weight on the heuristic. `W = 1` is optimal but slow with a weak heuristic;
-/// `W > 1` trades a little length for a lot of speed (weighted A*).
-const W: u32 = 2;
+/// Default weight on the heuristic. `w = 1` is optimal but slow with a weak
+/// heuristic; larger `w` trades a little length for a lot of speed (weighted A*)
+/// and, on hard deals, the difference between finding a win and not.
+pub const DEFAULT_WEIGHT: u32 = 2;
 
 pub struct SolveResult {
     pub moves: Option<Vec<Move>>,
     pub nodes: u64,
     pub hit_limit: bool,
-    /// True when Phase 2 (A*) fully explored its space within budget.
+    /// True when A* fully explored its space within budget (no shorter solution
+    /// was findable). Meaningful only when `moves` came from A*.
     pub converged: bool,
+    /// True when the answer came from the DFS fallback (A* found nothing), so
+    /// the solution is valid but not short.
+    pub from_fallback: bool,
 }
 
 struct Frame {
@@ -40,29 +46,22 @@ struct Frame {
 pub struct Solver;
 
 impl Solver {
-    pub fn solve(board: &Board, node_limit: u64) -> SolveResult {
+    pub fn solve(board: &Board, node_limit: u64, weight: u32) -> SolveResult {
         let mut nodes: u64 = 0;
 
-        // Phase 1: any solution, fast (also proves solvability / fallback).
-        let phase1 = dfs_first(board, node_limit, &mut nodes);
-        let mut best = match phase1 {
-            Some(p) => p,
-            None => return SolveResult { moves: None, nodes, hit_limit: nodes >= node_limit, converged: false },
-        };
-
-        // Phase 2: heuristic search for a shorter solution with the rest.
-        let (astar, converged) = astar_short(board, node_limit, &mut nodes);
+        // Primary: weighted-A* for a short solution (and best shot at hard deals).
+        let (astar, converged) = astar_short(board, node_limit, &mut nodes, weight);
         if let Some(p) = astar {
-            if p.len() < best.len() {
-                best = p;
-            }
+            return SolveResult { moves: Some(p), nodes, hit_limit: false, converged, from_fallback: false };
         }
 
-        SolveResult {
-            moves: Some(best),
-            nodes,
-            hit_limit: nodes >= node_limit,
-            converged,
+        // Fallback: plain DFS for *any* solution, with its own fresh budget.
+        let mut dfs_nodes: u64 = 0;
+        let fallback = dfs_first(board, node_limit, &mut dfs_nodes);
+        nodes += dfs_nodes;
+        match fallback {
+            Some(p) => SolveResult { moves: Some(p), nodes, hit_limit: false, converged: false, from_fallback: true },
+            None => SolveResult { moves: None, nodes, hit_limit: true, converged: false, from_fallback: false },
         }
     }
 }
@@ -72,12 +71,15 @@ impl Solver {
 fn heuristic(b: &Board) -> u32 {
     let mut face_down = 0u32;
     let mut breaks = 0u32;
-    let mut tableau = 0u32;
+    let mut empties = 0u32;
     for c in 0..COLS {
+        let col = &b.cols[c];
+        if col.is_empty() {
+            empties += 1;
+            continue;
+        }
         let fd = b.face_down[c] as usize;
         face_down += fd as u32;
-        let col = &b.cols[c];
-        tableau += col.len() as u32;
         // Count "breaks": adjacent face-up cards not in same-suit descending order.
         for i in fd..col.len().saturating_sub(1) {
             let upper = col[i];
@@ -88,9 +90,12 @@ fn heuristic(b: &Board) -> u32 {
         }
     }
     let stock = b.stock.len() as u32;
-    // Every hidden card must be uncovered, every break resolved, every run still
-    // owed assembled, and the tableau ultimately emptied.
-    face_down * 2 + breaks * 2 + stock + tableau / 4 + (8 - b.completed as u32)
+    let remaining_runs = 8 - b.completed as u32;
+    // Every hidden card must be uncovered, every break resolved, every stock card
+    // dealt, and every remaining run assembled. Empty columns are powerful (they
+    // unlock arbitrary moves), so they lower the estimate.
+    let base = face_down * 4 + breaks * 3 + stock * 2 + remaining_runs * 6;
+    base.saturating_sub(empties * 3)
 }
 
 /// Plain depth-first search for the first solution (never re-expands a state).
@@ -161,14 +166,14 @@ struct Node {
 ///
 /// Memory-lean: nodes are 8 bytes (no stored board), and expansion uses
 /// make/undo on one working board instead of cloning per child.
-fn astar_short(start: &Board, node_limit: u64, nodes: &mut u64) -> (Option<Vec<Move>>, bool) {
+fn astar_short(start: &Board, node_limit: u64, nodes: &mut u64, w: u32) -> (Option<Vec<Move>>, bool) {
     let mut arena: Vec<Node> = vec![Node { parent: u32::MAX, mv: Move::Deal }];
     let mut closed: HashSet<u64> = HashSet::new();
     // (priority, g, arena index); Reverse so the smallest priority pops first.
     let mut open: BinaryHeap<(Reverse<u32>, u32, u32)> = BinaryHeap::new();
 
     closed.insert(start.hash());
-    open.push((Reverse(W * heuristic(start)), 0, 0));
+    open.push((Reverse(w * heuristic(start)), 0, 0));
 
     while let Some((_pri, g, idx)) = open.pop() {
         // Rebuild this node's board once, then expand with make/undo.
@@ -187,7 +192,7 @@ fn astar_short(start: &Board, node_limit: u64, nodes: &mut u64) -> (Option<Vec<M
             }
             if closed.insert(board.hash()) {
                 let ci = arena.len() as u32;
-                let pri = (g + 1) + W * heuristic(&board);
+                let pri = (g + 1) + w * heuristic(&board);
                 arena.push(Node { parent: idx, mv: m });
                 open.push((Reverse(pri), g + 1, ci));
             }

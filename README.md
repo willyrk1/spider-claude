@@ -21,6 +21,8 @@ Flags:
 | `--suits`  | `1`       | difficulty: `1`, `2`, or `4` suits                  |
 | `--seed`   | `42`      | RNG seed for the deal (reproducible)               |
 | `--nodes`  | `20000000`| search budget; raise it for harder deals            |
+| `--weight` | `2`       | heuristic weight in A\* (`g + weight*h`); higher is  |
+|            |           | greedier — faster and more likely to crack hard deals, but longer solutions |
 | `--quiet`  | off       | suppress the board dump and per-move solution list  |
 
 ## How it works
@@ -30,26 +32,27 @@ Flags:
   (in-place with an undo record, no cloning), and a *canonical* hash (columns
   are sorted before hashing, so column permutations collapse to one state — a
   big transposition-table win).
-- **`src/solver.rs`** — a two-phase search:
-  1. **Phase 1** — plain make/undo DFS with a transposition table finds *a*
-     solution fast (guarantees an answer for solvable deals; kept as fallback).
-  2. **Phase 2** — weighted-A\* ordered by `g + W*h`, where `h` estimates moves
-     remaining (face-down cards, sequence breaks, stock, tableau size). This
-     finds a *much* shorter solution. Nodes are 8 bytes (board reconstructed by
-     replay), so memory stays low.
+- **`src/solver.rs`** — a heuristic search:
+  - **Primary** is a weighted-A\* ordered by `g + weight*h`, where `h` estimates
+    moves remaining. The heuristic counts face-down cards, sequence "breaks", and
+    stock, and *rewards empty columns* — that last term is what makes 4-suit
+    tractable, because an empty column unlocks arbitrary moves. Nodes are 8 bytes
+    (board reconstructed by replay), so memory stays low.
+  - **Fallback** is a plain make/undo DFS that runs only if A\* finds nothing, so
+    an easy solvable deal always gets *an* answer.
 
-  The shorter of the two results wins, and `main` self-verifies it by replaying.
+  `main` self-verifies the returned solution by replaying it on a fresh deal.
 - **`src/rng.rs`** — a tiny xorshift PRNG so deals are reproducible offline.
 
-Typical 1-suit solutions are ~100–130 moves (down from the 1k–12k that a naive
-first-win DFS produces).
+Typical 1-suit solutions are ~100–130 moves (down from the 1k–12k a naive
+first-win DFS produces). Many 4-suit deals now solve too (~180–220 moves),
+though some remain out of reach within budget.
 
 ## Where to optimize next (in rough order of payoff)
 
-1. **Crack 4-suit** — still unsolved within budget; needs a stronger lower-bound
-   heuristic and/or a transposition table inside the A\* frontier.
-2. **A stronger, admissible heuristic** to return provably-optimal lengths and
-   cut A\* node counts.
+1. **Solve more 4-suit deals** — a stronger heuristic and/or a transposition
+   table inside the A\* frontier would extend reach to the currently-hard deals.
+2. **An admissible heuristic + `weight 1`** to return provably-optimal lengths.
 3. **Bitset/`u64` state encoding** to hash and compare states without heap.
 
 The rules and search are deliberately separated so the front end you eventually

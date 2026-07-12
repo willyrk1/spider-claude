@@ -23,6 +23,7 @@ fn main() {
     let suits: u8 = arg(&args, "--suits").unwrap_or(1);
     let seed: u64 = arg(&args, "--seed").unwrap_or(42);
     let node_limit: u64 = arg(&args, "--nodes").unwrap_or(20_000_000);
+    let weight: u32 = arg(&args, "--weight").unwrap_or(solver::DEFAULT_WEIGHT);
     let quiet = args.iter().any(|a| a == "--quiet");
 
     if !matches!(suits, 1 | 2 | 4) {
@@ -42,12 +43,14 @@ fn main() {
     // Iterative search uses an explicit stack, so it runs fine on the normal
     // main-thread stack — no deep recursion, no overflow.
     let start = Instant::now();
-    let result = Solver::solve(&board, node_limit);
+    let result = Solver::solve(&board, node_limit, weight);
     let elapsed = start.elapsed();
 
     match result.moves {
         Some(moves) => {
-            let quality = if result.converged {
+            let quality = if result.from_fallback {
+                "DFS fallback — long path; A* found nothing in budget"
+            } else if result.converged {
                 "shortest found (search converged)"
             } else {
                 "shortest found so far — raise --nodes to shorten further"
