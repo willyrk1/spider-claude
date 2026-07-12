@@ -45,8 +45,10 @@ Flags:
 - **`src/rng.rs`** — a tiny xorshift PRNG so deals are reproducible offline.
 
 Typical 1-suit solutions are ~100–130 moves (down from the 1k–12k a naive
-first-win DFS produces). Many 4-suit deals now solve too (~180–220 moves),
-though some remain out of reach within budget.
+first-win DFS produces). About **55% of 4-suit deals** now solve too — 22 of 40
+seeds at `--weight 3`, in 157–245 moves — most in under a second; the rest
+remain out of reach within budget. Different `--weight` values crack somewhat
+different deals, so a seed that fails at one weight may solve at another.
 
 ## Where to optimize next (in rough order of payoff)
 
