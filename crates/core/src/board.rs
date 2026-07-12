@@ -99,6 +99,52 @@ impl Board {
         self.completed == 8
     }
 
+    /// Build a partially-known board from what a player can see: for each of the
+    /// 10 columns, its face-down count and its face-up cards in bottom→top order.
+    /// Face-down cards become `UNKNOWN` sentinels and the stock is left empty (a
+    /// partial-information advisor never deals). Validates card codes.
+    pub fn from_visible(columns: &[(u8, Vec<Card>)]) -> Result<Board, String> {
+        if columns.len() != COLS {
+            return Err(format!("expected {COLS} columns, got {}", columns.len()));
+        }
+        let mut cols: [Vec<Card>; COLS] = std::array::from_fn(|_| Vec::new());
+        let mut face_down = [0u8; COLS];
+        for (i, (fd, up)) in columns.iter().enumerate() {
+            let mut v = Vec::with_capacity(*fd as usize + up.len());
+            for _ in 0..*fd {
+                v.push(UNKNOWN);
+            }
+            for &card in up {
+                let (r, s) = (rank(card), suit(card));
+                if !(1..=13).contains(&r) || s > 3 {
+                    return Err(format!("column {i}: invalid card code {card}"));
+                }
+                v.push(card);
+            }
+            cols[i] = v;
+            face_down[i] = *fd;
+        }
+        Ok(Board { cols, face_down, stock: Vec::new(), completed: 0 })
+    }
+
+    /// Total face-down (unknown) cards remaining — the advisor tries to reduce it.
+    pub fn face_down_total(&self) -> u32 {
+        self.face_down.iter().map(|&f| f as u32).sum()
+    }
+
+    /// Number of empty columns (powerful — they accept any card).
+    pub fn empty_columns(&self) -> u32 {
+        self.cols.iter().filter(|c| c.is_empty()).count() as u32
+    }
+
+    /// Sum of (movable same-suit run length − 1) across columns; rewards
+    /// consolidating cards into ordered runs.
+    pub fn run_bonus(&self) -> u32 {
+        (0..COLS)
+            .map(|c| self.movable_run_len(c).saturating_sub(1) as u32)
+            .sum()
+    }
+
     /// Length of the maximal same-suit descending run at the top (playable end)
     /// of a column, considering only face-up cards.
     fn movable_run_len(&self, c: usize) -> usize {
@@ -106,6 +152,11 @@ impl Board {
         let n = col.len();
         let fd = self.face_down[c] as usize;
         if n == 0 {
+            return 0;
+        }
+        // An unknown (not-yet-revealed) card can't be moved — it must be turned
+        // up in real life first. Never happens in a fully-dealt game.
+        if is_unknown(col[n - 1]) {
             return 0;
         }
         let mut len = 1;

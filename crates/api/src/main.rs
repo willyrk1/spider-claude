@@ -16,14 +16,15 @@ use axum::{http::StatusCode, routing::get, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 
 use spider_core::board::{Board, Move};
-use spider_core::card::{rank, suit};
-use spider_core::solver::{self, Solver};
+use spider_core::card::{make_card, rank, suit, Card};
+use spider_core::solver::{self, Advice, Solver};
 
 #[tokio::main]
 async fn main() {
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
-        .route("/solve", post(solve));
+        .route("/solve", post(solve))
+        .route("/advise", post(advise));
 
     let addr = "127.0.0.1:3000";
     let listener = tokio::net::TcpListener::bind(addr)
@@ -208,4 +209,103 @@ fn move_dto(m: &Move) -> MoveDto {
         Move::Tableau { from, to, count } => MoveDto::Tableau { from, to, count },
         Move::Deal => MoveDto::Deal,
     }
+}
+
+// ---- Advisor (partial-information "play along" mode) ----
+
+#[derive(Deserialize)]
+struct CardInput {
+    rank: u8,
+    suit: u8,
+}
+
+#[derive(Deserialize)]
+struct ColumnInput {
+    #[serde(default)]
+    face_down: u8,
+    /// Face-up cards, bottom → top.
+    #[serde(default)]
+    up: Vec<CardInput>,
+}
+
+/// A board as a player sees it: face-up cards plus face-down counts. Hidden
+/// cards and the stock are unknown, so the response is advice, not a solution.
+#[derive(Deserialize)]
+struct AdviseRequest {
+    suits: u8,
+    columns: Vec<ColumnInput>,
+    #[serde(default = "default_advise_nodes")]
+    nodes: u64,
+}
+
+fn default_advise_nodes() -> u64 {
+    2_000_000
+}
+
+#[derive(Serialize)]
+struct AdviseResponse {
+    moves: Vec<MoveDto>,
+    /// Face-down cards the plan exposes (turn these up and re-submit).
+    uncovers: u32,
+    completes: u32,
+    empties: u32,
+    note: String,
+}
+
+async fn advise(
+    Json(req): Json<AdviseRequest>,
+) -> Result<Json<AdviseResponse>, (StatusCode, String)> {
+    if !matches!(req.suits, 1 | 2 | 4) {
+        return Err((StatusCode::BAD_REQUEST, "suits must be 1, 2, or 4".into()));
+    }
+    if req.columns.len() != 10 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("expected 10 columns, got {}", req.columns.len()),
+        ));
+    }
+
+    // Validate and convert the visible cards.
+    let mut columns: Vec<(u8, Vec<Card>)> = Vec::with_capacity(10);
+    for (i, col) in req.columns.iter().enumerate() {
+        let mut up = Vec::with_capacity(col.up.len());
+        for c in &col.up {
+            if !(1..=13).contains(&c.rank) || c.suit >= req.suits {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "column {i}: rank {} suit {} is invalid for {}-suit",
+                        c.rank, c.suit, req.suits
+                    ),
+                ));
+            }
+            up.push(make_card(c.rank, c.suit));
+        }
+        columns.push((col.face_down, up));
+    }
+
+    let board = Board::from_visible(&columns).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let advice: Advice = tokio::task::spawn_blocking(move || Solver::advise(&board, req.nodes))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let note = if advice.moves.is_empty() {
+        "No productive move over the visible cards — deal a new row (if the stock has cards) or reveal more.".to_string()
+    } else {
+        format!(
+            "Play {} move(s): uncovers {}, completes {}, empties {}.",
+            advice.moves.len(),
+            advice.uncovers,
+            advice.completes,
+            advice.empties
+        )
+    };
+
+    Ok(Json(AdviseResponse {
+        moves: advice.moves.iter().map(move_dto).collect(),
+        uncovers: advice.uncovers,
+        completes: advice.completes,
+        empties: advice.empties,
+        note,
+    }))
 }

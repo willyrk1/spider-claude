@@ -20,7 +20,7 @@ use std::collections::{BinaryHeap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
-use crate::board::{Board, Move, COLS};
+use crate::board::{Board, Move, Undo, COLS};
 use crate::card::{rank, suit};
 
 /// Default weight on the heuristic. `w = 1` is optimal but slow with a weak
@@ -51,6 +51,18 @@ pub struct SolveResult {
     /// The `(weight, fd_weight)` config that produced the answer, when the
     /// portfolio was used.
     pub winning_config: Option<(u32, u32)>,
+}
+
+/// A recommendation from the partial-information advisor.
+pub struct Advice {
+    /// The recommended sequence of moves to play now.
+    pub moves: Vec<Move>,
+    /// How many face-down cards the plan exposes (ready to turn up).
+    pub uncovers: u32,
+    /// How many K..A runs the plan completes.
+    pub completes: u32,
+    /// How many columns the plan empties.
+    pub empties: u32,
 }
 
 struct Frame {
@@ -150,6 +162,86 @@ impl Solver {
                 moves: None, nodes: total_nodes, hit_limit: true, converged: false,
                 from_fallback: false, winning_config: None,
             },
+        }
+    }
+
+    /// Partial-information advisor. Over the *visible* cards only — no deals, and
+    /// unknown (face-down) cards can't be moved — search for a short sequence
+    /// that best improves the position, chiefly by uncovering face-down cards.
+    /// Returns the recommended plan and what it achieves; re-run after revealing
+    /// the newly-exposed cards.
+    pub fn advise(board: &Board, node_limit: u64) -> Advice {
+        const DEPTH_CAP: usize = 30;
+
+        let mut b = board.clone();
+        let initial_fd = board.face_down_total();
+        let mut visited: HashSet<u64> = HashSet::new();
+        let mut path: Vec<Move> = Vec::new();
+        let mut undos: Vec<Undo> = Vec::new();
+        let mut stack: Vec<Frame> = Vec::new();
+        let mut nodes: u64 = 0;
+
+        let mut best_score = advice_score(&b, initial_fd);
+        let mut best_path: Vec<Move> = Vec::new();
+
+        visited.insert(b.hash());
+        stack.push(Frame { moves: generate(&b), idx: 0 });
+
+        'search: loop {
+            let top = match stack.last_mut() {
+                Some(f) => f,
+                None => break,
+            };
+            let mut descend = None;
+            if path.len() < DEPTH_CAP {
+                while top.idx < top.moves.len() {
+                    let m = top.moves[top.idx];
+                    top.idx += 1;
+                    nodes += 1;
+                    if nodes > node_limit {
+                        break 'search;
+                    }
+                    let undo = b.make(m);
+                    if visited.insert(b.hash()) {
+                        path.push(m);
+                        let sc = advice_score(&b, initial_fd);
+                        // Strictly better score wins; equal score prefers the
+                        // shorter plan.
+                        if sc > best_score || (sc == best_score && path.len() < best_path.len()) {
+                            best_score = sc;
+                            best_path = path.clone();
+                        }
+                        descend = Some(undo);
+                        break;
+                    }
+                    b.undo(&undo);
+                }
+            }
+            match descend {
+                Some(undo) => {
+                    undos.push(undo);
+                    stack.push(Frame { moves: generate(&b), idx: 0 });
+                }
+                None => {
+                    stack.pop();
+                    if let Some(undo) = undos.pop() {
+                        b.undo(&undo);
+                        path.pop();
+                    }
+                }
+            }
+        }
+
+        // Replay the winning plan to report what it achieves.
+        let mut end = board.clone();
+        for &m in &best_path {
+            end.make(m);
+        }
+        Advice {
+            moves: best_path,
+            uncovers: initial_fd - end.face_down_total(),
+            completes: end.completed as u32,
+            empties: end.empty_columns(),
         }
     }
 }
@@ -328,6 +420,16 @@ fn reconstruct(arena: &[Node], idx: u32, last: Move) -> Vec<Move> {
     }
     rev.reverse();
     rev
+}
+
+/// Score a partially-known state for the advisor: reward completed runs, then
+/// uncovered face-down cards, then empty columns, then longer built runs.
+fn advice_score(b: &Board, initial_fd: u32) -> i64 {
+    let uncovered = (initial_fd - b.face_down_total()) as i64;
+    let completed = b.completed as i64;
+    let empties = b.empty_columns() as i64;
+    let build = b.run_bonus() as i64;
+    completed * 1000 + uncovered * 100 + empties * 40 + build * 2
 }
 
 /// Generate the legal moves at the current state, ordered best-first so Phase 1
