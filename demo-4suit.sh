@@ -3,17 +3,16 @@
 # demo-4suit.sh — show the solver cracking a full 4-suit Spider deal (hard mode).
 #
 # Usage:
-#   ./demo-4suit.sh [SEED] [WEIGHT] [NODES]
+#   ./demo-4suit.sh [SEED] [NODES]
 #
-# Defaults to seed 0 (solves in well under a second). Not every 4-suit deal is
-# solvable within budget; different --weight values crack different deals, so if
-# one seed doesn't solve, try another seed or weight. Run from the repo root.
+# Defaults to seed 0 (solves in well under a second). Uses the default parallel
+# portfolio of search configs. Not every 4-suit deal is solvable within budget;
+# if one seed doesn't solve, try another. Run from the repo root.
 
 set -euo pipefail
 
 SEED="${1:-0}"
-WEIGHT="${2:-2}"
-NODES="${3:-20000000}"
+NODES="${2:-20000000}"
 MOVES_TO_SHOW=15
 
 # Locate the release binary (.exe on Windows/Git Bash), building it if needed.
@@ -27,10 +26,10 @@ if [ ! -x "$BIN" ]; then
 fi
 
 echo "======================================================================"
-echo " Spider Solitaire solver — 4-suit demo (seed $SEED, weight $WEIGHT)"
+echo " Spider Solitaire solver — 4-suit demo (seed $SEED, portfolio search)"
 echo "======================================================================"
 
-out="$("$BIN" --suits 4 --seed "$SEED" --weight "$WEIGHT" --nodes "$NODES")"
+out="$("$BIN" --suits 4 --seed "$SEED" --nodes "$NODES")"
 
 # Board + summary + verification line, down to the 'Solution:' header (if any).
 printf '%s\n' "$out" | sed -n '1,/^Solution:$/p'

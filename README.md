@@ -20,9 +20,9 @@ Flags:
 |------------|-----------|-----------------------------------------------------|
 | `--suits`  | `1`       | difficulty: `1`, `2`, or `4` suits                  |
 | `--seed`   | `42`      | RNG seed for the deal (reproducible)               |
-| `--nodes`  | `20000000`| search budget; raise it for harder deals            |
-| `--weight` | `2`       | heuristic weight in A\* (`g + weight*h`); higher is  |
-|            |           | greedier — faster and more likely to crack hard deals, but longer solutions |
+| `--nodes`  | `20000000`| per-search node budget; raise it for harder deals   |
+| `--weight` | portfolio | if set, forces a single A\* with this `g + weight*h` weight (else the portfolio runs) |
+| `--fdw`    | portfolio | if set, forces the heuristic's face-down weight (else the portfolio runs) |
 | `--quiet`  | off       | suppress the board dump and per-move solution list  |
 
 ## How it works
@@ -33,27 +33,34 @@ Flags:
   are sorted before hashing, so column permutations collapse to one state — a
   big transposition-table win).
 - **`src/solver.rs`** — a heuristic search:
-  - **Primary** is a weighted-A\* ordered by `g + weight*h`, where `h` estimates
-    moves remaining. The heuristic counts face-down cards, sequence "breaks", and
-    stock, and *rewards empty columns* — that last term is what makes 4-suit
-    tractable, because an empty column unlocks arbitrary moves. Nodes are 8 bytes
-    (board reconstructed by replay), so memory stays low.
-  - **Fallback** is a plain make/undo DFS that runs only if A\* finds nothing, so
-    an easy solvable deal always gets *an* answer.
+  - Each search is a **weighted-A\*** ordered by `g + weight*h`, where `h`
+    estimates moves remaining. The heuristic counts face-down cards, sequence
+    "breaks", and stock, and *rewards empty columns* — that last term is what
+    makes 4-suit tractable, because an empty column unlocks arbitrary moves.
+    Nodes are 8 bytes (board reconstructed by replay), so memory stays low.
+  - By default the solver runs a **portfolio**: several `(weight, fd_weight)`
+    configs in parallel (one thread each), taking the first solution any finds
+    and stopping the rest. Different configs crack largely different hard deals,
+    so the portfolio's coverage far exceeds any single config's. A single-
+    threaded DFS is a last-resort fallback if every config comes up empty.
 
-  `main` self-verifies the returned solution by replaying it on a fresh deal.
+  `main` self-verifies the returned solution by replaying it on a fresh deal,
+  and reports which config won.
 - **`src/rng.rs`** — a tiny xorshift PRNG so deals are reproducible offline.
 
-Typical 1-suit solutions are ~100–130 moves (down from the 1k–12k a naive
-first-win DFS produces). About **55% of 4-suit deals** now solve too — 22 of 40
-seeds at `--weight 3`, in 157–245 moves — most in under a second; the rest
-remain out of reach within budget. Different `--weight` values crack somewhat
-different deals, so a seed that fails at one weight may solve at another.
+Typical 1-suit solutions are ~100–140 moves (down from the 1k–12k a naive
+first-win DFS produces), found in well under a second. On 4-suit, the portfolio
+is a big step up: it solved **27 of 30 sample deals (~90%)** at 15M nodes/thread
+(seeds 0–29), in ~160–245 moves and mostly under a second — versus ~50% for any
+single configuration. Every config in the portfolio won some deal no other did,
+which is exactly why the union wins. The genuinely hard or unwinnable deals
+still time out.
 
 ## Where to optimize next (in rough order of payoff)
 
-1. **Solve more 4-suit deals** — a stronger heuristic and/or a transposition
-   table inside the A\* frontier would extend reach to the currently-hard deals.
+1. **The hard 4-suit tail** — a stronger heuristic (e.g. a pattern-database
+   lower bound) or macro-moves ("supermoves") would reach the deals that time
+   out even under the portfolio.
 2. **An admissible heuristic + `weight 1`** to return provably-optimal lengths.
 3. **Bitset/`u64` state encoding** to hash and compare states without heap.
 
