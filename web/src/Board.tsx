@@ -17,6 +17,43 @@ function activeCols(move: Move | null): Set<number> {
   return s;
 }
 
+/**
+ * The completed K..A runs, shown as foundation piles that fill up during
+ * playback. There are always 8 slots (a win = 8 runs); each filled slot shows
+ * the suit of that completed run. `justCompleted` highlights the newest one.
+ */
+export function Foundations({
+  suits,
+  justCompleted,
+}: {
+  suits: number[];
+  justCompleted: boolean;
+}) {
+  return (
+    <div className="foundations">
+      <div className="col-label foundations-label">completed runs</div>
+      {Array.from({ length: 8 }, (_, i) => {
+        const suit = suits[i];
+        const filled = suit !== undefined;
+        const isNewest = filled && i === suits.length - 1 && justCompleted;
+        const cls = filled ? (isRed(suit) ? 'red' : 'black') : 'empty';
+        return (
+          <div key={i} className={`foundation ${cls}${isNewest ? ' pop' : ''}`}>
+            {filled && (
+              <>
+                <span className="corner tl">
+                  K{suitSymbol(suit)}
+                </span>
+                <span className="pip">{suitSymbol(suit)}</span>
+              </>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function Board({ state, move }: Props) {
   const active = activeCols(move);
   const dealing = move?.type === 'deal';

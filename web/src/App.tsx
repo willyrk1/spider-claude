@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Board } from './Board';
+import { Board, Foundations } from './Board';
 import { solve, type SolveResponse } from './api';
 import {
   computeStates,
@@ -184,6 +184,13 @@ export default function App() {
                   · {states[step].completed}/8 runs complete
                 </span>
               </div>
+              <Foundations
+                suits={states[step].completedSuits}
+                justCompleted={
+                  step > 0 &&
+                  states[step].completed > states[step - 1].completed
+                }
+              />
               <Board state={states[step]} move={currentMove} />
             </div>
           )}

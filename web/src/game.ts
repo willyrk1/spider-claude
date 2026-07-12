@@ -19,7 +19,13 @@ export type InitialBoard = {
 };
 
 export type Column = { cards: Card[]; faceDown: number };
-export type GameState = { columns: Column[]; stock: Card[]; completed: number };
+export type GameState = {
+  columns: Column[];
+  stock: Card[];
+  completed: number;
+  /** Suit of each completed K..A run, in completion order (length === completed). */
+  completedSuits: number[];
+};
 
 export const COLS = 10;
 
@@ -37,6 +43,7 @@ export function initialState(board: InitialBoard): GameState {
     columns,
     stock: board.stock.map((c) => ({ rank: c.rank, suit: c.suit })),
     completed: 0,
+    completedSuits: [],
   };
 }
 
@@ -45,6 +52,7 @@ function cloneState(s: GameState): GameState {
     columns: s.columns.map((c) => ({ cards: c.cards.slice(), faceDown: c.faceDown })),
     stock: s.stock.slice(),
     completed: s.completed,
+    completedSuits: s.completedSuits.slice(),
   };
 }
 
@@ -65,6 +73,7 @@ function tryComplete(state: GameState, c: number) {
   }
   col.cards.length = n - 13;
   state.completed++;
+  state.completedSuits.push(suit);
   flipIfNeeded(col);
 }
 

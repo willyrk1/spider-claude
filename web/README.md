@@ -32,6 +32,8 @@ serve the built app from a different origin, you'd add CORS to the API.)
   move/deal/run-completion logic (`src/game.ts`) — and confirms it reaches a win
   (an independent cross-check of the Rust solver).
 - A player (play/pause/step/scrub) animates the solution to the finish.
+- A foundations row shows the completed K..A runs filling up (by suit) as the
+  solution plays.
 
 ## Layout
 
