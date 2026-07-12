@@ -24,6 +24,7 @@ fn main() {
     let seed: u64 = arg(&args, "--seed").unwrap_or(42);
     let node_limit: u64 = arg(&args, "--nodes").unwrap_or(20_000_000);
     let weight: u32 = arg(&args, "--weight").unwrap_or(solver::DEFAULT_WEIGHT);
+    let fd_weight: u32 = arg(&args, "--fdw").unwrap_or(solver::DEFAULT_FD_WEIGHT);
     let quiet = args.iter().any(|a| a == "--quiet");
 
     if !matches!(suits, 1 | 2 | 4) {
@@ -43,7 +44,7 @@ fn main() {
     // Iterative search uses an explicit stack, so it runs fine on the normal
     // main-thread stack — no deep recursion, no overflow.
     let start = Instant::now();
-    let result = Solver::solve(&board, node_limit, weight);
+    let result = Solver::solve(&board, node_limit, weight, fd_weight);
     let elapsed = start.elapsed();
 
     match result.moves {

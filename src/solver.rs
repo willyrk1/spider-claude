@@ -26,6 +26,10 @@ use crate::card::{rank, suit};
 /// and, on hard deals, the difference between finding a win and not.
 pub const DEFAULT_WEIGHT: u32 = 2;
 
+/// Default weight on face-down cards in the heuristic. Raising it makes the
+/// search favor states that have turned up more buried cards.
+pub const DEFAULT_FD_WEIGHT: u32 = 4;
+
 pub struct SolveResult {
     pub moves: Option<Vec<Move>>,
     pub nodes: u64,
@@ -46,11 +50,11 @@ struct Frame {
 pub struct Solver;
 
 impl Solver {
-    pub fn solve(board: &Board, node_limit: u64, weight: u32) -> SolveResult {
+    pub fn solve(board: &Board, node_limit: u64, weight: u32, fd_weight: u32) -> SolveResult {
         let mut nodes: u64 = 0;
 
         // Primary: weighted-A* for a short solution (and best shot at hard deals).
-        let (astar, converged) = astar_short(board, node_limit, &mut nodes, weight);
+        let (astar, converged) = astar_short(board, node_limit, &mut nodes, weight, fd_weight);
         if let Some(p) = astar {
             return SolveResult { moves: Some(p), nodes, hit_limit: false, converged, from_fallback: false };
         }
@@ -68,7 +72,7 @@ impl Solver {
 
 /// Estimated moves remaining (0 exactly at a win). Not admissible — it's tuned
 /// to guide the search, not to prove optimality.
-fn heuristic(b: &Board) -> u32 {
+fn heuristic(b: &Board, fd_weight: u32) -> u32 {
     let mut face_down = 0u32;
     let mut breaks = 0u32;
     let mut empties = 0u32;
@@ -93,8 +97,9 @@ fn heuristic(b: &Board) -> u32 {
     let remaining_runs = 8 - b.completed as u32;
     // Every hidden card must be uncovered, every break resolved, every stock card
     // dealt, and every remaining run assembled. Empty columns are powerful (they
-    // unlock arbitrary moves), so they lower the estimate.
-    let base = face_down * 4 + breaks * 3 + stock * 2 + remaining_runs * 6;
+    // unlock arbitrary moves), so they lower the estimate. `fd_weight` controls
+    // how strongly the search favors turning up face-down cards.
+    let base = face_down * fd_weight + breaks * 3 + stock * 2 + remaining_runs * 6;
     base.saturating_sub(empties * 3)
 }
 
@@ -166,14 +171,20 @@ struct Node {
 ///
 /// Memory-lean: nodes are 8 bytes (no stored board), and expansion uses
 /// make/undo on one working board instead of cloning per child.
-fn astar_short(start: &Board, node_limit: u64, nodes: &mut u64, w: u32) -> (Option<Vec<Move>>, bool) {
+fn astar_short(
+    start: &Board,
+    node_limit: u64,
+    nodes: &mut u64,
+    w: u32,
+    fdw: u32,
+) -> (Option<Vec<Move>>, bool) {
     let mut arena: Vec<Node> = vec![Node { parent: u32::MAX, mv: Move::Deal }];
     let mut closed: HashSet<u64> = HashSet::new();
     // (priority, g, arena index); Reverse so the smallest priority pops first.
     let mut open: BinaryHeap<(Reverse<u32>, u32, u32)> = BinaryHeap::new();
 
     closed.insert(start.hash());
-    open.push((Reverse(w * heuristic(start)), 0, 0));
+    open.push((Reverse(w * heuristic(start, fdw)), 0, 0));
 
     while let Some((_pri, g, idx)) = open.pop() {
         // Rebuild this node's board once, then expand with make/undo.
@@ -192,7 +203,7 @@ fn astar_short(start: &Board, node_limit: u64, nodes: &mut u64, w: u32) -> (Opti
             }
             if closed.insert(board.hash()) {
                 let ci = arena.len() as u32;
-                let pri = (g + 1) + w * heuristic(&board);
+                let pri = (g + 1) + w * heuristic(&board, fdw);
                 arena.push(Node { parent: idx, mv: m });
                 open.push((Reverse(pri), g + 1, ci));
             }
