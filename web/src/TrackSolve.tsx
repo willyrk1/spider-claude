@@ -1,37 +1,46 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Board, Foundations } from './Board';
 import { plan, type PlanResponse } from './api';
 import {
   allKnown,
-  applyTrackMove,
   computeStates,
   describeMove,
   hasUnfilled,
-  newTrackBoard,
   parseCards,
   parseTrack,
+  replayLog,
   serializeTrack,
   trackDisplayState,
   trackToGameState,
   type GameState,
-  type TrackBoard,
+  type TrackEvent,
 } from './game';
 
-const STORAGE_KEY = 'spider-track-board';
+const STORAGE_KEY = 'spider-track-log';
 
-function loadBoard(): TrackBoard | null {
+/** Restore the saved action log from this browser, if any. */
+function loadSaved(): { suits: number; log: TrackEvent[] } | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as TrackBoard) : null;
+    if (!raw) return null;
+    const { suits, log } = parseTrack(raw);
+    return suits && log ? { suits, log } : null;
   } catch {
     return null;
   }
 }
 
-/** Track a real game as you reveal cards; solve it once everything is known. */
+/**
+ * Track a real game as you reveal cards; solve it once everything is known.
+ * The whole game is stored as an action log (reveals, moves, deals) from the
+ * initial deal, and the board is derived by replaying it — so a saved session
+ * reproduces the game exactly.
+ */
 export default function TrackSolve() {
-  const [suits, setSuits] = useState(4);
-  const [board, setBoard] = useState<TrackBoard>(() => loadBoard() ?? newTrackBoard());
+  const [suits, setSuits] = useState<number>(() => loadSaved()?.suits ?? 4);
+  const [log, setLog] = useState<TrackEvent[]>(() => loadSaved()?.log ?? []);
+  const board = useMemo(() => replayLog(log), [log]);
+
   const [resp, setResp] = useState<PlanResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,11 +55,11 @@ export default function TrackSolve() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(board));
+      localStorage.setItem(STORAGE_KEY, serializeTrack(suits, log));
     } catch {
       /* ignore */
     }
-  }, [board]);
+  }, [suits, log]);
 
   useEffect(() => {
     if (!playing || !states) return;
@@ -67,7 +76,7 @@ export default function TrackSolve() {
   const canDeal = board.stockCount > 0 && !emptyColumns && !unfilled;
 
   function reset() {
-    setBoard(newTrackBoard());
+    setLog([]);
     setResp(null);
     setError(null);
     setStates(null);
@@ -75,7 +84,7 @@ export default function TrackSolve() {
   }
 
   function onCopySession() {
-    const text = serializeTrack(suits, board);
+    const text = serializeTrack(suits, log);
     setSessionText(text);
     navigator.clipboard?.writeText(text).then(
       () => {
@@ -89,36 +98,28 @@ export default function TrackSolve() {
   }
 
   function onLoadSession() {
-    const { suits: s, board: b, error: err } = parseTrack(sessionText);
-    if (err || !b || !s) {
+    const { suits: s, log: lg, error: err } = parseTrack(sessionText);
+    if (err || !lg || !s) {
       setError(`Couldn't load session: ${err ?? 'invalid'}`);
       return;
     }
     setSuits(s);
-    setBoard(b);
+    setLog(lg);
     setResp(null);
     setStates(null);
     setError(null);
     setDrafts({});
   }
 
-  /** Commit a typed card into column `c`'s empty (null) slot. */
+  /** Record a revealed card in column `c` (appends to the log). */
   function fillCard(c: number, text: string) {
     const { cards, error: err } = parseCards(text);
     if (err || cards.length !== 1) {
       setError(`Column ${c}: type one card (e.g. Kh)`);
       return;
     }
-    setBoard((b) => ({
-      ...b,
-      columns: b.columns.map((col, i) => {
-        if (i !== c) return col;
-        const idx = col.up.findIndex((x) => x === null);
-        const up = col.up.slice();
-        if (idx >= 0) up[idx] = cards[0];
-        return { ...col, up };
-      }),
-    }));
+    if (!board.columns[c].up.some((x) => x === null)) return; // no slot to fill
+    setLog((l) => [...l, { kind: 'reveal', col: c, card: cards[0] }]);
     setDrafts((d) => ({ ...d, [c]: '' }));
     setError(null);
     setResp(null);
@@ -158,23 +159,18 @@ export default function TrackSolve() {
 
   function applyMoves() {
     if (!resp) return;
-    const moves = resp.moves;
-    // Functional update so moves always apply to the latest board (never a
-    // stale closure), keeping the tracked board in step with your game.
-    setBoard((b0) => {
-      let b = b0;
-      for (const m of moves) b = applyTrackMove(b, m);
-      return b;
-    });
+    const events: TrackEvent[] = resp.moves.map((m) =>
+      m.type === 'deal'
+        ? { kind: 'deal' }
+        : { kind: 'move', from: m.from, to: m.to, count: m.count },
+    );
+    setLog((l) => [...l, ...events]);
     setResp(null);
     setDrafts({});
   }
 
   function dealRow() {
-    setBoard((b) => ({
-      columns: b.columns.map((c) => ({ ...c, up: [...c.up, null] })),
-      stockCount: Math.max(0, b.stockCount - 10),
-    }));
+    setLog((l) => [...l, { kind: 'deal' }]);
     setResp(null);
   }
 
@@ -215,9 +211,10 @@ export default function TrackSolve() {
       <details className="session">
         <summary>💾 Save / load session</summary>
         <p className="hint">
-          Copy this to save or share your tracked game; paste it back and{' '}
-          <b>Load from text</b> to resume. Your board also auto-saves in this
-          browser, so you won't lose progress as you work toward the solution.
+          This is the full action log from the initial deal, so it reproduces
+          your game exactly. Copy it to save, share, or report a bug; paste one
+          back and <b>Load from text</b> to replay it. Also auto-saves in this
+          browser.
         </p>
         <div className="session-actions">
           <button onClick={onCopySession}>

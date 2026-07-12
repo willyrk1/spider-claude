@@ -8,9 +8,11 @@ A React + TypeScript front end for the Spider Solitaire solver. Two modes:
   Type in the face-up cards; ask for the next steps to uncover more; the tool
   applies the moves and shows each newly-revealed card as a **?** to fill in;
   deal a row when stuck. Once every card is known it returns — and plays — the
-  full winning solution from your current position. The board auto-saves to the
-  browser, and a **Save / load session** panel lets you copy it to text and
-  paste it back later to resume or share.
+  full winning solution from your current position. A **Save / load session**
+  panel captures the whole game as an *action log* from the initial deal
+  (`reveal <col> <card>` / `move <from> <to> <count>` / `deal`), so pasting it
+  back replays the game exactly — handy for resuming, sharing, or reporting a
+  bug. Auto-saves to the browser too.
 
 ## Run
 

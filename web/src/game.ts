@@ -244,43 +244,77 @@ export function cardToShort(card: Card): string {
   return rn + (SUIT_SHORT[card.suit] ?? '?');
 }
 
-/** Human-readable, copy-pasteable snapshot of a tracked game. */
-export function serializeTrack(suits: number, board: TrackBoard): string {
-  const lines = [`suits: ${suits}`, `stock: ${board.stockCount}`];
-  for (const col of board.columns) {
-    const up = col.up.map((c) => (c === null ? '?' : cardToShort(c))).join(' ');
-    lines.push(`${col.faceDown} | ${up}`);
+// A session is the full sequence of actions from the initial deal, so the
+// entire game (and any bug) can be reproduced by replaying it.
+export type TrackEvent =
+  | { kind: 'reveal'; col: number; card: Card } // a face-down/dealt card typed in
+  | { kind: 'move'; from: number; to: number; count: number }
+  | { kind: 'deal' };
+
+/** Fill column `col`'s first empty (null) slot with `card`. */
+export function revealCard(board: TrackBoard, col: number, card: Card): TrackBoard {
+  return {
+    ...board,
+    columns: board.columns.map((c, i) => {
+      if (i !== col) return c;
+      const idx = c.up.findIndex((x) => x === null);
+      if (idx < 0) return c;
+      const up = c.up.slice();
+      up[idx] = card;
+      return { ...c, up };
+    }),
+  };
+}
+
+/** Rebuild the board by replaying the event log from a fresh deal. */
+export function replayLog(log: TrackEvent[]): TrackBoard {
+  let b = newTrackBoard();
+  for (const e of log) {
+    if (e.kind === 'reveal') b = revealCard(b, e.col, e.card);
+    else if (e.kind === 'move') {
+      b = applyTrackMove(b, { type: 'tableau', from: e.from, to: e.to, count: e.count });
+    } else b = applyTrackMove(b, { type: 'deal' });
+  }
+  return b;
+}
+
+/** Human-readable, copy-pasteable action log (one event per line). */
+export function serializeTrack(suits: number, log: TrackEvent[]): string {
+  const lines = [`suits: ${suits}`];
+  for (const e of log) {
+    if (e.kind === 'reveal') lines.push(`reveal ${e.col} ${cardToShort(e.card)}`);
+    else if (e.kind === 'move') lines.push(`move ${e.from} ${e.to} ${e.count}`);
+    else lines.push('deal');
   }
   return lines.join('\n');
 }
 
-/** Parse a snapshot from `serializeTrack` (whitespace-tolerant; "?" = unknown). */
-export function parseTrack(text: string): { suits?: number; board?: TrackBoard; error?: string } {
+/** Parse an action log produced by `serializeTrack`. */
+export function parseTrack(text: string): { suits?: number; log?: TrackEvent[]; error?: string } {
   const lines = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
   const sm = lines[0]?.match(/^suits:\s*([124])$/i);
   if (!sm) return { error: 'first line must be "suits: 1", "suits: 2", or "suits: 4"' };
-  const km = lines[1]?.match(/^stock:\s*(\d+)$/i);
-  if (!km) return { error: 'second line must be "stock: N"' };
-  const colLines = lines.slice(2);
-  if (colLines.length !== 10) {
-    return { error: `expected 10 column lines, got ${colLines.length}` };
-  }
-  const columns: TrackColumn[] = [];
-  for (let i = 0; i < 10; i++) {
-    const [left, right = ''] = colLines[i].split('|');
-    const fd = parseInt(left.trim(), 10);
-    if (Number.isNaN(fd) || fd < 0) return { error: `column ${i}: bad face-down count` };
-    const up: (Card | null)[] = [];
-    for (const tok of right.trim().split(/\s+/).filter(Boolean)) {
-      if (tok === '?') {
-        up.push(null);
-        continue;
+  const log: TrackEvent[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const p = lines[i].split(/\s+/);
+    if (p[0] === 'reveal') {
+      const col = parseInt(p[1], 10);
+      const { cards, error } = parseCards(p[2] ?? '');
+      if (Number.isNaN(col) || col < 0 || col > 9 || error || cards.length !== 1) {
+        return { error: `line ${i + 1}: bad reveal "${lines[i]}"` };
       }
-      const { cards, error } = parseCards(tok);
-      if (error || cards.length !== 1) return { error: `column ${i}: bad card "${tok}"` };
-      up.push(cards[0]);
+      log.push({ kind: 'reveal', col, card: cards[0] });
+    } else if (p[0] === 'move') {
+      const [from, to, count] = [parseInt(p[1], 10), parseInt(p[2], 10), parseInt(p[3], 10)];
+      if ([from, to, count].some((n) => Number.isNaN(n))) {
+        return { error: `line ${i + 1}: bad move "${lines[i]}"` };
+      }
+      log.push({ kind: 'move', from, to, count });
+    } else if (p[0] === 'deal') {
+      log.push({ kind: 'deal' });
+    } else {
+      return { error: `line ${i + 1}: unknown event "${p[0]}"` };
     }
-    columns.push({ faceDown: fd, up });
   }
-  return { suits: Number(sm[1]), board: { columns, stockCount: Number(km[1]) } };
+  return { suits: Number(sm[1]), log };
 }
