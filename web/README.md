@@ -1,20 +1,16 @@
 # spider-web
 
-A React + TypeScript front end for the Spider Solitaire solver. Three modes:
+A React + TypeScript front end for the Spider Solitaire solver. Two modes:
 
 - **Solve a deal** — deal a game by suits + seed, then play the solver's full
   solution move by move.
-- **Play along (advisor)** — for a game you're playing elsewhere where you can
-  only see the face-up cards. Enter each column's face-down count and face-up
-  cards; the server recommends moves that best uncover face-down cards. Reveal
-  the exposed cards, update the board, and ask again. (Uses `POST /advise`.)
-  The board auto-saves to the browser, and a **Save / load session** panel lets
-  you copy the board to text and paste it back later to resume or share.
 - **Track & solve** — track a real game as you reveal cards (uses `POST /plan`).
   Type in the face-up cards; ask for the next steps to uncover more; the tool
   applies the moves and shows each newly-revealed card as a **?** to fill in;
   deal a row when stuck. Once every card is known it returns — and plays — the
-  full winning solution from your current position. Auto-saves to the browser.
+  full winning solution from your current position. The board auto-saves to the
+  browser, and a **Save / load session** panel lets you copy it to text and
+  paste it back later to resume or share.
 
 ## Run
 

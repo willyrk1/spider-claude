@@ -232,52 +232,55 @@ export function trackToGameState(board: TrackBoard): GameState {
   };
 }
 
-// ---- Session save / load (advisor mode) ----
+// ---- Track session save / load (copy-paste text) ----
 
-export type Session = { suits: number; cols: { faceDown: number; text: string }[] };
+const SUIT_SHORT = ['s', 'h', 'c', 'd'];
 
-/** A human-readable, copy-pasteable snapshot of an advisor session. */
-export function serializeSession(s: Session): string {
-  const lines = [`suits: ${s.suits}`];
-  for (const c of s.cols) lines.push(`${c.faceDown} | ${c.text.trim()}`);
+/** Card as shorthand, e.g. "Ks", "10h". */
+export function cardToShort(card: Card): string {
+  const r = card.rank;
+  const rn =
+    r === 1 ? 'A' : r === 10 ? '10' : r === 11 ? 'J' : r === 12 ? 'Q' : r === 13 ? 'K' : String(r);
+  return rn + (SUIT_SHORT[card.suit] ?? '?');
+}
+
+/** Human-readable, copy-pasteable snapshot of a tracked game. */
+export function serializeTrack(suits: number, board: TrackBoard): string {
+  const lines = [`suits: ${suits}`, `stock: ${board.stockCount}`];
+  for (const col of board.columns) {
+    const up = col.up.map((c) => (c === null ? '?' : cardToShort(c))).join(' ');
+    lines.push(`${col.faceDown} | ${up}`);
+  }
   return lines.join('\n');
 }
 
-/** Parse a session string produced by `serializeSession` (whitespace-tolerant). */
-export function parseSession(text: string): { session?: Session; error?: string } {
+/** Parse a snapshot from `serializeTrack` (whitespace-tolerant; "?" = unknown). */
+export function parseTrack(text: string): { suits?: number; board?: TrackBoard; error?: string } {
   const lines = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
-  if (lines.length === 0) return { error: 'nothing to load' };
-  const sm = lines[0].match(/^suits:\s*([124])$/i);
+  const sm = lines[0]?.match(/^suits:\s*([124])$/i);
   if (!sm) return { error: 'first line must be "suits: 1", "suits: 2", or "suits: 4"' };
-  const colLines = lines.slice(1);
+  const km = lines[1]?.match(/^stock:\s*(\d+)$/i);
+  if (!km) return { error: 'second line must be "stock: N"' };
+  const colLines = lines.slice(2);
   if (colLines.length !== 10) {
-    return { error: `expected 10 column lines after "suits:", got ${colLines.length}` };
+    return { error: `expected 10 column lines, got ${colLines.length}` };
   }
-  const cols = [];
+  const columns: TrackColumn[] = [];
   for (let i = 0; i < 10; i++) {
     const [left, right = ''] = colLines[i].split('|');
     const fd = parseInt(left.trim(), 10);
     if (Number.isNaN(fd) || fd < 0) return { error: `column ${i}: bad face-down count` };
-    cols.push({ faceDown: fd, text: right.trim() });
+    const up: (Card | null)[] = [];
+    for (const tok of right.trim().split(/\s+/).filter(Boolean)) {
+      if (tok === '?') {
+        up.push(null);
+        continue;
+      }
+      const { cards, error } = parseCards(tok);
+      if (error || cards.length !== 1) return { error: `column ${i}: bad card "${tok}"` };
+      up.push(cards[0]);
+    }
+    columns.push({ faceDown: fd, up });
   }
-  return { session: { suits: Number(sm[1]), cols } };
-}
-
-/**
- * Build a renderable state from what a player typed: face-down cards become
- * placeholder backs (their identity is unknown), followed by the face-up cards.
- */
-export function displayState(columns: { faceDown: number; up: Card[] }[]): GameState {
-  return {
-    columns: columns.map((c) => ({
-      cards: [
-        ...Array.from({ length: c.faceDown }, () => ({ rank: 0, suit: 0 })),
-        ...c.up,
-      ],
-      faceDown: c.faceDown,
-    })),
-    stock: [],
-    completed: 0,
-    completedSuits: [],
-  };
+  return { suits: Number(sm[1]), board: { columns, stockCount: Number(km[1]) } };
 }

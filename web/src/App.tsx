@@ -1,9 +1,8 @@
 import { useState } from 'react';
 import SolveView from './SolveView';
-import Advisor from './Advisor';
 import TrackSolve from './TrackSolve';
 
-type Mode = 'solve' | 'advise' | 'track';
+type Mode = 'solve' | 'track';
 
 export default function App() {
   const [mode, setMode] = useState<Mode>('solve');
@@ -25,12 +24,10 @@ export default function App() {
 
       <div className="tabs">
         {tab('solve', 'Solve a deal')}
-        {tab('advise', 'Play along (advisor)')}
         {tab('track', 'Track & solve')}
       </div>
 
       {mode === 'solve' && <SolveView />}
-      {mode === 'advise' && <Advisor />}
       {mode === 'track' && <TrackSolve />}
     </div>
   );

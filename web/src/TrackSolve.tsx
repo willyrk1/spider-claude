@@ -9,6 +9,8 @@ import {
   hasUnfilled,
   newTrackBoard,
   parseCards,
+  parseTrack,
+  serializeTrack,
   trackDisplayState,
   trackToGameState,
   type GameState,
@@ -34,6 +36,8 @@ export default function TrackSolve() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<number, string>>({});
+  const [sessionText, setSessionText] = useState('');
+  const [copied, setCopied] = useState(false);
 
   // Solve-phase player.
   const [states, setStates] = useState<GameState[] | null>(null);
@@ -67,6 +71,34 @@ export default function TrackSolve() {
     setResp(null);
     setError(null);
     setStates(null);
+    setDrafts({});
+  }
+
+  function onCopySession() {
+    const text = serializeTrack(suits, board);
+    setSessionText(text);
+    navigator.clipboard?.writeText(text).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      },
+      () => {
+        /* clipboard blocked — the text is in the box to copy manually */
+      },
+    );
+  }
+
+  function onLoadSession() {
+    const { suits: s, board: b, error: err } = parseTrack(sessionText);
+    if (err || !b || !s) {
+      setError(`Couldn't load session: ${err ?? 'invalid'}`);
+      return;
+    }
+    setSuits(s);
+    setBoard(b);
+    setResp(null);
+    setStates(null);
+    setError(null);
     setDrafts({});
   }
 
@@ -173,6 +205,28 @@ export default function TrackSolve() {
         </button>
         <button onClick={reset}>New game</button>
       </div>
+
+      <details className="session">
+        <summary>💾 Save / load session</summary>
+        <p className="hint">
+          Copy this to save or share your tracked game; paste it back and{' '}
+          <b>Load from text</b> to resume. Your board also auto-saves in this
+          browser, so you won't lose progress as you work toward the solution.
+        </p>
+        <div className="session-actions">
+          <button onClick={onCopySession}>
+            {copied ? 'Copied ✓' : 'Copy current session'}
+          </button>
+          <button onClick={onLoadSession}>Load from text</button>
+        </div>
+        <textarea
+          className="session-text"
+          rows={8}
+          value={sessionText}
+          onChange={(e) => setSessionText(e.target.value)}
+          placeholder="Click 'Copy current session' to fill this box, or paste a previously-saved session here and click 'Load from text'."
+        />
+      </details>
 
       {error && <div className="banner error">⚠ {error}</div>}
 
