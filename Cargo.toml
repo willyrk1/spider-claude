@@ -1,19 +1,17 @@
-[package]
-name = "spider-solver"
+# Cargo workspace: a pure-computation core library plus front ends that consume
+# it. Today the only front end is the CLI; an HTTP API (and/or a WASM build) can
+# be added as sibling crates without touching the core.
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/cli"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "A fast native Spider Solitaire solver (DFS + transposition table)"
 
-[[bin]]
-name = "spider"
-path = "src/main.rs"
-
-# Release profile tuned for search throughput.
+# Release profile tuned for search throughput (applies to every member).
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-
-# No dependencies on purpose: the whole thing builds offline.
-[dependencies]

@@ -1,0 +1,13 @@
+[package]
+name = "spider-cli"
+version.workspace = true
+edition.workspace = true
+description = "Command-line front end for the Spider Solitaire solver"
+
+# Binary name stays `spider`, so target/release/spider(.exe) is unchanged.
+[[bin]]
+name = "spider"
+path = "src/main.rs"
+
+[dependencies]
+spider-core = { path = "../core" }

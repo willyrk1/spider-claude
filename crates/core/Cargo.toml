@@ -1,0 +1,12 @@
+[package]
+name = "spider-core"
+version.workspace = true
+edition.workspace = true
+description = "Spider Solitaire rules, board model, and solver engine"
+
+[lib]
+name = "spider_core"
+path = "src/lib.rs"
+
+# No dependencies on purpose: the core builds offline.
+[dependencies]

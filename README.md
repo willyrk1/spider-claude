@@ -25,14 +25,27 @@ Flags:
 | `--fdw`    | portfolio | if set, forces the heuristic's face-down weight (else the portfolio runs) |
 | `--quiet`  | off       | suppress the board dump and per-move solution list  |
 
+## Project layout
+
+A Cargo workspace so the engine can back many front ends:
+
+```
+crates/
+├── core/   spider-core — pure engine (card, board, solver, rng); no I/O, no deps
+└── cli/    spider-cli  — the `spider` binary; a thin front end over the core
+```
+
+An HTTP API or a WASM build would slot in as a sibling crate (e.g. `crates/api`)
+depending on `spider-core`, without touching the engine.
+
 ## How it works
 
-- **`src/card.rs`** — a card is one byte: `(suit << 4) | rank`.
-- **`src/board.rs`** — board state, Spider rules, move generation, `make`/`undo`
-  (in-place with an undo record, no cloning), and a *canonical* hash (columns
-  are sorted before hashing, so column permutations collapse to one state — a
-  big transposition-table win).
-- **`src/solver.rs`** — a heuristic search:
+- **`crates/core/src/card.rs`** — a card is one byte: `(suit << 4) | rank`.
+- **`crates/core/src/board.rs`** — board state, Spider rules, move generation,
+  `make`/`undo` (in-place with an undo record, no cloning), and a *canonical*
+  hash (columns are sorted before hashing, so column permutations collapse to
+  one state — a big transposition-table win).
+- **`crates/core/src/solver.rs`** — a heuristic search:
   - Each search is a **weighted-A\*** ordered by `g + weight*h`, where `h`
     estimates moves remaining. The heuristic counts face-down cards, sequence
     "breaks", and stock, and *rewards empty columns* — that last term is what
@@ -44,9 +57,10 @@ Flags:
     so the portfolio's coverage far exceeds any single config's. A single-
     threaded DFS is a last-resort fallback if every config comes up empty.
 
-  `main` self-verifies the returned solution by replaying it on a fresh deal,
+  The CLI self-verifies the returned solution by replaying it on a fresh deal,
   and reports which config won.
-- **`src/rng.rs`** — a tiny xorshift PRNG so deals are reproducible offline.
+- **`crates/core/src/rng.rs`** — a tiny xorshift PRNG so deals are reproducible
+  offline.
 
 Typical 1-suit solutions are ~100–140 moves (down from the 1k–12k a naive
 first-win DFS produces), found in well under a second. On 4-suit, the portfolio

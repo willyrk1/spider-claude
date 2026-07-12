@@ -8,15 +8,10 @@
 //!   spider --suits 2 --seed 7
 //!   spider --suits 4 --nodes 20000000
 
-mod board;
-mod card;
-mod rng;
-mod solver;
-
 use std::time::Instant;
 
-use board::{Board, Move};
-use solver::Solver;
+use spider_core::board::{Board, Move};
+use spider_core::solver::{self, Solver};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
