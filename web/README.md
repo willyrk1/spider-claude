@@ -7,12 +7,17 @@ A React + TypeScript front end for the Spider Solitaire solver. Two modes:
 - **Track & solve** — track a real game as you reveal cards (uses `POST /plan`).
   Type in the face-up cards; ask for the next steps to uncover more; the tool
   applies the moves and shows each newly-revealed card as a **?** to fill in;
-  deal a row when stuck. Once every card is known it returns — and plays — the
-  full winning solution from your current position. A **Save / load session**
-  panel captures the whole game as an *action log* from the initial deal
-  (`reveal <col> <card>` / `move <from> <to> <count>` / `deal`), so pasting it
-  back replays the game exactly — handy for resuming, sharing, or reporting a
-  bug. Auto-saves to the browser too.
+  deal a row when stuck; **↶ Undo** reverses the last move/deal. Once every card
+  is known it returns — and plays — the full winning solution from your current
+  position.
+
+  The model: the game is determined by the initial deck, which you *learn* as
+  you reveal cards. So a revealed card feeds the **initial deal** (knowledge),
+  while moves/deals are the reversible **actions** — and Undo reverses actions
+  only, never your knowledge. The **Save / load session** panel stores the
+  (partially-known) initial deal plus the action log (`t0…t9` + `stock` +
+  `move`/`deal` lines); pasting it back replays the game exactly — handy for
+  resuming, sharing, or reporting a bug. Auto-saves to the browser too.
 
 ## Run
 

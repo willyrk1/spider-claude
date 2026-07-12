@@ -2,29 +2,36 @@ import { useEffect, useMemo, useState } from 'react';
 import { Board, Foundations } from './Board';
 import { plan, type PlanResponse } from './api';
 import {
-  allKnown,
+  boardDisplayState,
+  boardToGameState,
   computeStates,
+  deriveBoard,
   describeMove,
-  hasUnfilled,
+  fullyKnown,
+  hasUnrevealed,
+  newInitialDeal,
   parseCards,
   parseTrack,
-  replayLog,
+  planColumns,
+  planStock,
+  revealAt,
+  revealTargets,
   serializeTrack,
-  trackDisplayState,
-  trackToGameState,
+  stockRemaining,
+  type Action,
   type GameState,
-  type TrackEvent,
+  type InitialDeal,
 } from './game';
 
-const STORAGE_KEY = 'spider-track-log';
+const STORAGE_KEY = 'spider-track-session';
 
-/** Restore the saved action log from this browser, if any. */
-function loadSaved(): { suits: number; log: TrackEvent[] } | null {
+/** Restore the saved session (initial deal + actions) from this browser. */
+function loadSaved(): { suits: number; deal: InitialDeal; actions: Action[] } | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    const { suits, log } = parseTrack(raw);
-    return suits && log ? { suits, log } : null;
+    const { suits, deal, actions } = parseTrack(raw);
+    return suits && deal && actions ? { suits, deal, actions } : null;
   } catch {
     return null;
   }
@@ -32,14 +39,16 @@ function loadSaved(): { suits: number; log: TrackEvent[] } | null {
 
 /**
  * Track a real game as you reveal cards; solve it once everything is known.
- * The whole game is stored as an action log (reveals, moves, deals) from the
- * initial deal, and the board is derived by replaying it — so a saved session
- * reproduces the game exactly.
+ * The session is the (partially-known) initial deal plus a log of actions
+ * (moves/deals) — reveals feed the initial deal, not the action log — and the
+ * board is derived by replaying the actions. So Undo reverses actions only, and
+ * a saved session reproduces the game exactly.
  */
 export default function TrackSolve() {
   const [suits, setSuits] = useState<number>(() => loadSaved()?.suits ?? 4);
-  const [log, setLog] = useState<TrackEvent[]>(() => loadSaved()?.log ?? []);
-  const board = useMemo(() => replayLog(log), [log]);
+  const [deal, setDeal] = useState<InitialDeal>(() => loadSaved()?.deal ?? newInitialDeal());
+  const [actions, setActions] = useState<Action[]>(() => loadSaved()?.actions ?? []);
+  const board = useMemo(() => deriveBoard(deal, actions), [deal, actions]);
 
   const [resp, setResp] = useState<PlanResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -55,11 +64,11 @@ export default function TrackSolve() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, serializeTrack(suits, log));
+      localStorage.setItem(STORAGE_KEY, serializeTrack(suits, deal, actions));
     } catch {
       /* ignore */
     }
-  }, [suits, log]);
+  }, [suits, deal, actions]);
 
   useEffect(() => {
     if (!playing || !states) return;
@@ -71,22 +80,23 @@ export default function TrackSolve() {
     return () => clearTimeout(id);
   }, [playing, step, states]);
 
-  const unfilled = hasUnfilled(board);
-  const emptyColumns = board.columns.some((c) => c.faceDown === 0 && c.up.length === 0);
-  const canDeal = board.stockCount > 0 && !emptyColumns && !unfilled;
+  const unfilled = hasUnrevealed(board, deal);
+  const emptyColumns = board.columns.some((c) => c.cards.length === 0);
+  const canDeal = stockRemaining(board) > 0 && !emptyColumns && !unfilled;
 
   function reset() {
-    setLog([]);
+    setDeal(newInitialDeal());
+    setActions([]);
     setResp(null);
     setError(null);
     setStates(null);
     setDrafts({});
   }
 
-  /** Undo the last recorded step (a reveal, a move, or a deal). Repeatable. */
+  /** Undo the last *action* (move or deal). Revealed cards stay known. */
   function undo() {
-    if (log.length === 0) return;
-    setLog((l) => l.slice(0, -1));
+    if (actions.length === 0) return;
+    setActions((a) => a.slice(0, -1));
     setResp(null);
     setError(null);
     setStates(null);
@@ -94,7 +104,7 @@ export default function TrackSolve() {
   }
 
   function onCopySession() {
-    const text = serializeTrack(suits, log);
+    const text = serializeTrack(suits, deal, actions);
     setSessionText(text);
     navigator.clipboard?.writeText(text).then(
       () => {
@@ -108,29 +118,29 @@ export default function TrackSolve() {
   }
 
   function onLoadSession() {
-    const { suits: s, log: lg, error: err } = parseTrack(sessionText);
-    if (err || !lg || !s) {
+    const { suits: s, deal: d, actions: a, error: err } = parseTrack(sessionText);
+    if (err || !d || !a || !s) {
       setError(`Couldn't load session: ${err ?? 'invalid'}`);
       return;
     }
     setSuits(s);
-    setLog(lg);
+    setDeal(d);
+    setActions(a);
     setResp(null);
     setStates(null);
     setError(null);
     setDrafts({});
   }
 
-  /** Record a revealed card in column `c` (appends to the log). */
+  /** Record a revealed card into the initial deal. */
   function fillCard(c: number, text: string) {
     const { cards, error: err } = parseCards(text);
     if (err || cards.length !== 1) {
       setError(`Column ${c}: type one card (e.g. Kh)`);
       return;
     }
-    if (!board.columns[c].up.some((x) => x === null)) return; // no slot to fill
-    setLog((l) => [...l, { kind: 'reveal', col: c, card: cards[0] }]);
-    setDrafts((d) => ({ ...d, [c]: '' }));
+    setDeal((d) => revealAt(d, board, c, cards[0]));
+    setDrafts((dr) => ({ ...dr, [c]: '' }));
     setError(null);
     setResp(null);
   }
@@ -145,18 +155,10 @@ export default function TrackSolve() {
     setPlaying(false);
     setStates(null);
     try {
-      const columns = board.columns.map((c) => ({
-        face_down: c.faceDown,
-        cards: [
-          ...Array.from({ length: c.faceDown }, () => null),
-          ...c.up,
-        ] as ({ rank: number; suit: number } | null)[],
-      }));
-      const stock = Array.from({ length: board.stockCount }, () => null);
-      const r = await plan({ suits, columns, stock });
+      const r = await plan({ suits, columns: planColumns(board, deal), stock: planStock(board, deal) });
       setResp(r);
       if (r.phase === 'solve') {
-        setStates(computeStates(trackToGameState(board), r.moves));
+        setStates(computeStates(boardToGameState(board, deal), r.moves));
         setStep(0);
       }
     } catch (e) {
@@ -169,25 +171,22 @@ export default function TrackSolve() {
 
   function applyMoves() {
     if (!resp) return;
-    const events: TrackEvent[] = resp.moves.map((m) =>
+    const acts: Action[] = resp.moves.map((m) =>
       m.type === 'deal'
         ? { kind: 'deal' }
         : { kind: 'move', from: m.from, to: m.to, count: m.count },
     );
-    setLog((l) => [...l, ...events]);
+    setActions((a) => [...a, ...acts]);
     setResp(null);
     setDrafts({});
   }
 
   function dealRow() {
-    setLog((l) => [...l, { kind: 'deal' }]);
+    setActions((a) => [...a, { kind: 'deal' }]);
     setResp(null);
   }
 
-  const revealCols = board.columns
-    .map((c, i) => (c.up.some((x) => x === null) ? i : -1))
-    .filter((i) => i >= 0);
-
+  const revealCols = revealTargets(board, deal);
   const solving = resp?.phase === 'solve' && states;
   const currentMove = solving && step > 0 ? resp!.moves[step - 1] : null;
 
@@ -196,10 +195,10 @@ export default function TrackSolve() {
       <p className="hint">
         Track a real game as you go. Type in the face-up cards you can see; ask
         for <b>next steps</b> to uncover more; fill in each revealed <b>?</b>{' '}
-        card; <b>deal a row</b> when stuck. <b>↶ Undo</b> reverses the last step
-        (a mistyped card, a move, or a deal) — press it repeatedly to back out of
-        a dead end and try a different line. Once every card is known, it returns
-        the full winning solution.
+        card; <b>deal a row</b> when stuck. <b>↶ Undo</b> reverses the last move
+        or deal (revealed cards stay known) — press it repeatedly to back out of
+        a dead end. Once every card is known, it returns the full winning
+        solution.
       </p>
 
       <div className="controls">
@@ -212,12 +211,12 @@ export default function TrackSolve() {
           </select>
         </label>
         <button className="primary" onClick={onPlan} disabled={loading || unfilled}>
-          {loading ? 'Thinking…' : allKnown(board) ? 'Solve!' : 'Get next steps'}
+          {loading ? 'Thinking…' : fullyKnown(board, deal) ? 'Solve!' : 'Get next steps'}
         </button>
         <button onClick={dealRow} disabled={!canDeal} title={canDeal ? '' : 'Deal needs cards in the stock, no empty columns, and no unfilled ? cards'}>
-          Deal a row ({board.stockCount})
+          Deal a row ({stockRemaining(board)})
         </button>
-        <button onClick={undo} disabled={log.length === 0} title="Undo the last step (reveal, move, or deal)">
+        <button onClick={undo} disabled={actions.length === 0} title="Undo the last move or deal">
           ↶ Undo
         </button>
         <button onClick={reset}>New game</button>
@@ -226,10 +225,10 @@ export default function TrackSolve() {
       <details className="session">
         <summary>💾 Save / load session</summary>
         <p className="hint">
-          This is the full action log from the initial deal, so it reproduces
-          your game exactly. Copy it to save, share, or report a bug; paste one
-          back and <b>Load from text</b> to replay it. Also auto-saves in this
-          browser.
+          The session is the (partially-known) initial deal plus your moves &
+          deals — so it reproduces the game exactly. Copy it to save, share, or
+          report a bug; paste one back and <b>Load from text</b> to replay it.
+          Also auto-saves in this browser.
         </p>
         <div className="session-actions">
           <button onClick={onCopySession}>
@@ -320,7 +319,7 @@ export default function TrackSolve() {
       {!solving && (
         <>
           <h3 className="board-title">Your board {unfilled ? '— fill in the ? cards' : ''}</h3>
-          <Board state={trackDisplayState(board)} move={null} showStock={false} />
+          <Board state={boardDisplayState(board, deal)} move={null} showStock={false} />
         </>
       )}
     </div>

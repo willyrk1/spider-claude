@@ -138,103 +138,15 @@ export function parseCards(text: string): { cards: Card[]; error?: string } {
   return { cards };
 }
 
-// ---- Track & solve: a live board with unknown (not-yet-revealed) cards ----
-
-// A face-up slot that's `null` is a card just revealed but not yet typed in.
-export type TrackColumn = { faceDown: number; up: (Card | null)[] };
-export type TrackBoard = { columns: TrackColumn[]; stockCount: number };
-
-/** A fresh deal: 6 cards in cols 0–3, 5 in cols 4–9, top card face-up (unknown
- *  until you type it), the rest face-down, and 50 in the stock. */
-export function newTrackBoard(): TrackBoard {
-  return {
-    columns: Array.from({ length: COLS }, (_, i) => ({
-      faceDown: i < 4 ? 5 : 4,
-      up: [null] as (Card | null)[],
-    })),
-    stockCount: 50,
-  };
-}
-
-export const hasUnfilled = (b: TrackBoard) =>
-  b.columns.some((c) => c.up.some((x) => x === null));
-
-export const allKnown = (b: TrackBoard) =>
-  b.stockCount === 0 && b.columns.every((c) => c.faceDown === 0 && c.up.every((x) => x !== null));
-
-function completeIfPossible(col: TrackColumn) {
-  const up = col.up;
-  if (up.length < 13) return;
-  const top = up.slice(up.length - 13);
-  if (top.some((c) => c === null)) return;
-  const suit = top[0]!.suit;
-  for (let i = 0; i < 13; i++) {
-    if (top[i]!.suit !== suit || top[i]!.rank !== 13 - i) return;
-  }
-  up.length -= 13;
-  if (up.length === 0 && col.faceDown > 0) {
-    col.faceDown--;
-    up.push(null); // a newly exposed face-down card
-  }
-}
-
-/** Apply one move to the live board, exposing a `null` slot when a face-down
- *  card gets uncovered (or when a row is dealt). */
-export function applyTrackMove(board: TrackBoard, m: Move): TrackBoard {
-  const b: TrackBoard = {
-    columns: board.columns.map((c) => ({ faceDown: c.faceDown, up: c.up.slice() })),
-    stockCount: board.stockCount,
-  };
-  if (m.type === 'deal') {
-    for (const c of b.columns) c.up.push(null);
-    b.stockCount = Math.max(0, b.stockCount - COLS);
-    for (const c of b.columns) completeIfPossible(c);
-    return b;
-  }
-  const from = b.columns[m.from];
-  const to = b.columns[m.to];
-  const moved = from.up.splice(from.up.length - m.count, m.count);
-  to.up.push(...moved);
-  if (from.up.length === 0 && from.faceDown > 0) {
-    from.faceDown--;
-    from.up.push(null);
-  }
-  completeIfPossible(to);
-  return b;
-}
-
-/** Renderable state; unknown cards (face-down or revealed-unfilled) use rank 0. */
-export function trackDisplayState(board: TrackBoard): GameState {
-  return {
-    columns: board.columns.map((c) => ({
-      cards: [
-        ...Array.from({ length: c.faceDown }, () => ({ rank: 0, suit: 0 })),
-        ...c.up.map((card) => card ?? { rank: 0, suit: 0 }),
-      ],
-      faceDown: c.faceDown,
-    })),
-    stock: [],
-    completed: 0,
-    completedSuits: [],
-  };
-}
-
-/** Convert a fully-known board into a solvable GameState (for the player). */
-export function trackToGameState(board: TrackBoard): GameState {
-  return {
-    columns: board.columns.map((c) => ({
-      cards: c.up.filter((x): x is Card => x !== null),
-      faceDown: 0,
-    })),
-    stock: [],
-    completed: 0,
-    completedSuits: [],
-  };
-}
-
-// ---- Track session save / load (copy-paste text) ----
+// ---- Track & solve: the initial deal (knowledge) + a log of actions ----
+//
+// The whole game is determined by the initial deck. As you play you *learn*
+// that deck (reveals fill it in); moves and deals are the reversible actions.
+// So the session = the (partially-known) initial deal + the action log, and the
+// current board is derived by replaying the actions on the initial deal.
 
 const SUIT_SHORT = ['s', 'h', 'c', 'd'];
+const TABLEAU_SIZES = [6, 6, 6, 6, 5, 5, 5, 5, 5, 5];
 
 /** Card as shorthand, e.g. "Ks", "10h". */
 export function cardToShort(card: Card): string {
@@ -244,77 +156,225 @@ export function cardToShort(card: Card): string {
   return rn + (SUIT_SHORT[card.suit] ?? '?');
 }
 
-// A session is the full sequence of actions from the initial deal, so the
-// entire game (and any bug) can be reproduced by replaying it.
-export type TrackEvent =
-  | { kind: 'reveal'; col: number; card: Card } // a face-down/dealt card typed in
+/** A reference to a fixed position in the initial deck. */
+export type Origin =
+  | { src: 't'; col: number; pos: number } // initial tableau card (col, bottom→top index)
+  | { src: 's'; idx: number }; // initial stock card (deal order)
+
+/** What we know of the initial deck; `null` = not yet revealed. */
+export type InitialDeal = {
+  tableau: (Card | null)[][]; // 10 columns, sizes 6,6,6,6,5,5,5,5,5,5, bottom→top
+  stock: (Card | null)[]; // 50, in deal order (10 dealt per row, cols 0..9)
+};
+
+/** A reversible action (never a reveal). */
+export type Action =
   | { kind: 'move'; from: number; to: number; count: number }
   | { kind: 'deal' };
 
-/** Fill column `col`'s first empty (null) slot with `card`. */
-export function revealCard(board: TrackBoard, col: number, card: Card): TrackBoard {
+export function newInitialDeal(): InitialDeal {
   return {
-    ...board,
-    columns: board.columns.map((c, i) => {
-      if (i !== col) return c;
-      const idx = c.up.findIndex((x) => x === null);
-      if (idx < 0) return c;
-      const up = c.up.slice();
-      up[idx] = card;
-      return { ...c, up };
-    }),
+    tableau: TABLEAU_SIZES.map((n) => Array.from({ length: n }, () => null as Card | null)),
+    stock: Array.from({ length: 50 }, () => null as Card | null),
   };
 }
 
-/** Rebuild the board by replaying the event log from a fresh deal. */
-export function replayLog(log: TrackEvent[]): TrackBoard {
-  let b = newTrackBoard();
-  for (const e of log) {
-    if (e.kind === 'reveal') b = revealCard(b, e.col, e.card);
-    else if (e.kind === 'move') {
-      b = applyTrackMove(b, { type: 'tableau', from: e.from, to: e.to, count: e.count });
-    } else b = applyTrackMove(b, { type: 'deal' });
-  }
-  return b;
+export const originValue = (deal: InitialDeal, o: Origin): Card | null =>
+  o.src === 't' ? deal.tableau[o.col][o.pos] : deal.stock[o.idx];
+
+// The derived board holds Origin references; values are looked up in the deal.
+type OriginColumn = { faceDown: number; cards: Origin[] };
+export type OriginBoard = { columns: OriginColumn[]; stockDealt: number };
+
+function initialOriginBoard(): OriginBoard {
+  return {
+    columns: TABLEAU_SIZES.map((n, col) => ({
+      faceDown: n - 1,
+      cards: Array.from({ length: n }, (_, pos) => ({ src: 't', col, pos }) as Origin),
+    })),
+    stockDealt: 0,
+  };
 }
 
-/** Human-readable, copy-pasteable action log (one event per line). */
-export function serializeTrack(suits: number, log: TrackEvent[]): string {
+function completeIfPossible(col: OriginColumn, deal: InitialDeal) {
+  const n = col.cards.length;
+  if (n < 13) return;
+  const vals = col.cards.slice(n - 13).map((o) => originValue(deal, o));
+  if (vals.some((v) => v === null)) return;
+  const suit = vals[0]!.suit;
+  for (let i = 0; i < 13; i++) {
+    if (vals[i]!.suit !== suit || vals[i]!.rank !== 13 - i) return;
+  }
+  col.cards.length = n - 13;
+  if (col.cards.length === col.faceDown && col.faceDown > 0) col.faceDown--;
+}
+
+function applyAction(ob: OriginBoard, a: Action, deal: InitialDeal): OriginBoard {
+  const nb: OriginBoard = {
+    columns: ob.columns.map((c) => ({ faceDown: c.faceDown, cards: c.cards.slice() })),
+    stockDealt: ob.stockDealt,
+  };
+  if (a.kind === 'deal') {
+    for (let c = 0; c < COLS; c++) nb.columns[c].cards.push({ src: 's', idx: nb.stockDealt + c });
+    nb.stockDealt += COLS;
+    for (const col of nb.columns) completeIfPossible(col, deal);
+    return nb;
+  }
+  const from = nb.columns[a.from];
+  const to = nb.columns[a.to];
+  const moved = from.cards.splice(from.cards.length - a.count, a.count);
+  to.cards.push(...moved);
+  if (from.cards.length === from.faceDown && from.faceDown > 0) from.faceDown--;
+  completeIfPossible(to, deal);
+  return nb;
+}
+
+/** Replay the actions on the initial deal to get the current board. */
+export function deriveBoard(deal: InitialDeal, actions: Action[]): OriginBoard {
+  let ob = initialOriginBoard();
+  for (const a of actions) ob = applyAction(ob, a, deal);
+  return ob;
+}
+
+export const stockRemaining = (ob: OriginBoard) => 50 - ob.stockDealt;
+
+/** Columns whose top (face-up) card hasn't been revealed yet — need typing in. */
+export function revealTargets(ob: OriginBoard, deal: InitialDeal): number[] {
+  const out: number[] = [];
+  ob.columns.forEach((c, i) => {
+    if (c.cards.length > c.faceDown && originValue(deal, c.cards[c.cards.length - 1]) === null) {
+      out.push(i);
+    }
+  });
+  return out;
+}
+
+export const hasUnrevealed = (ob: OriginBoard, deal: InitialDeal) =>
+  revealTargets(ob, deal).length > 0;
+
+/** Everything in play (and the undealt stock) is known → ready to solve. */
+export function fullyKnown(ob: OriginBoard, deal: InitialDeal): boolean {
+  if (ob.stockDealt < 50) return false; // can't know undealt stock
+  for (const c of ob.columns) for (const o of c.cards) if (originValue(deal, o) === null) return false;
+  return true;
+}
+
+/** Record the card just revealed at column `col`'s top into the initial deal. */
+export function revealAt(deal: InitialDeal, ob: OriginBoard, col: number, card: Card): InitialDeal {
+  const c = ob.columns[col];
+  if (c.cards.length <= c.faceDown) return deal;
+  const o = c.cards[c.cards.length - 1];
+  if (originValue(deal, o) !== null) return deal;
+  const nd: InitialDeal = { tableau: deal.tableau.map((t) => t.slice()), stock: deal.stock.slice() };
+  if (o.src === 't') nd.tableau[o.col][o.pos] = card;
+  else nd.stock[o.idx] = card;
+  return nd;
+}
+
+/** Renderable state; unknown cards (face-down or revealed-unfilled) use rank 0. */
+export function boardDisplayState(ob: OriginBoard, deal: InitialDeal): GameState {
+  return {
+    columns: ob.columns.map((c) => ({
+      cards: c.cards.map((o) => originValue(deal, o) ?? { rank: 0, suit: 0 }),
+      faceDown: c.faceDown,
+    })),
+    stock: [],
+    completed: 0,
+    completedSuits: [],
+  };
+}
+
+/** A fully-known board as a solvable GameState (for the solution player). */
+export function boardToGameState(ob: OriginBoard, deal: InitialDeal): GameState {
+  return {
+    columns: ob.columns.map((c) => ({
+      cards: c.cards.map((o) => originValue(deal, o)!),
+      faceDown: 0,
+    })),
+    stock: [],
+    completed: 0,
+    completedSuits: [],
+  };
+}
+
+/** The current position as a /plan request (columns + undealt stock). */
+export function planColumns(ob: OriginBoard, deal: InitialDeal) {
+  return ob.columns.map((c) => ({
+    face_down: c.faceDown,
+    cards: c.cards.map((o) => originValue(deal, o)) as (Card | null)[],
+  }));
+}
+export function planStock(ob: OriginBoard, deal: InitialDeal): (Card | null)[] {
+  return deal.stock.slice(ob.stockDealt);
+}
+
+// ---- Session save / load (initial deal + actions) ----
+
+function parseCardTokens(str: string): { cards: (Card | null)[]; error?: string } {
+  const out: (Card | null)[] = [];
+  for (const tok of str.trim().split(/\s+/).filter(Boolean)) {
+    if (tok === '?') {
+      out.push(null);
+      continue;
+    }
+    const { cards, error } = parseCards(tok);
+    if (error || cards.length !== 1) return { cards: [], error: `bad card "${tok}"` };
+    out.push(cards[0]);
+  }
+  return { cards: out };
+}
+
+/** Human-readable session: the initial deal plus the action log. */
+export function serializeTrack(suits: number, deal: InitialDeal, actions: Action[]): string {
+  const short = (c: Card | null) => (c ? cardToShort(c) : '?');
   const lines = [`suits: ${suits}`];
-  for (const e of log) {
-    if (e.kind === 'reveal') lines.push(`reveal ${e.col} ${cardToShort(e.card)}`);
-    else if (e.kind === 'move') lines.push(`move ${e.from} ${e.to} ${e.count}`);
-    else lines.push('deal');
+  deal.tableau.forEach((col, i) => lines.push(`t${i}: ${col.map(short).join(' ')}`));
+  lines.push(`stock: ${deal.stock.map(short).join(' ')}`);
+  for (const a of actions) {
+    lines.push(a.kind === 'move' ? `move ${a.from} ${a.to} ${a.count}` : 'deal');
   }
   return lines.join('\n');
 }
 
-/** Parse an action log produced by `serializeTrack`. */
-export function parseTrack(text: string): { suits?: number; log?: TrackEvent[]; error?: string } {
+export function parseTrack(
+  text: string,
+): { suits?: number; deal?: InitialDeal; actions?: Action[]; error?: string } {
   const lines = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
   const sm = lines[0]?.match(/^suits:\s*([124])$/i);
   if (!sm) return { error: 'first line must be "suits: 1", "suits: 2", or "suits: 4"' };
-  const log: TrackEvent[] = [];
-  for (let i = 1; i < lines.length; i++) {
+
+  const tableau: (Card | null)[][] = [];
+  for (let i = 0; i < 10; i++) {
+    const m = lines[1 + i]?.match(/^t(\d):\s*(.*)$/);
+    if (!m || Number(m[1]) !== i) return { error: `expected line ${i + 2} to be "t${i}: ..."` };
+    const { cards, error } = parseCardTokens(m[2]);
+    if (error) return { error: `t${i}: ${error}` };
+    if (cards.length !== TABLEAU_SIZES[i]) {
+      return { error: `t${i}: expected ${TABLEAU_SIZES[i]} cards, got ${cards.length}` };
+    }
+    tableau.push(cards);
+  }
+
+  const sMatch = lines[11]?.match(/^stock:\s*(.*)$/);
+  if (!sMatch) return { error: 'expected a "stock: ..." line' };
+  const { cards: stock, error: stockErr } = parseCardTokens(sMatch[1]);
+  if (stockErr) return { error: `stock: ${stockErr}` };
+  if (stock.length !== 50) return { error: `stock: expected 50 cards, got ${stock.length}` };
+
+  const actions: Action[] = [];
+  for (let i = 12; i < lines.length; i++) {
     const p = lines[i].split(/\s+/);
-    if (p[0] === 'reveal') {
-      const col = parseInt(p[1], 10);
-      const { cards, error } = parseCards(p[2] ?? '');
-      if (Number.isNaN(col) || col < 0 || col > 9 || error || cards.length !== 1) {
-        return { error: `line ${i + 1}: bad reveal "${lines[i]}"` };
-      }
-      log.push({ kind: 'reveal', col, card: cards[0] });
-    } else if (p[0] === 'move') {
+    if (p[0] === 'move') {
       const [from, to, count] = [parseInt(p[1], 10), parseInt(p[2], 10), parseInt(p[3], 10)];
       if ([from, to, count].some((n) => Number.isNaN(n))) {
         return { error: `line ${i + 1}: bad move "${lines[i]}"` };
       }
-      log.push({ kind: 'move', from, to, count });
+      actions.push({ kind: 'move', from, to, count });
     } else if (p[0] === 'deal') {
-      log.push({ kind: 'deal' });
+      actions.push({ kind: 'deal' });
     } else {
-      return { error: `line ${i + 1}: unknown event "${p[0]}"` };
+      return { error: `line ${i + 1}: unknown action "${p[0]}"` };
     }
   }
-  return { suits: Number(sm[1]), log };
+  return { suits: Number(sm[1]), deal: { tableau, stock }, actions };
 }
