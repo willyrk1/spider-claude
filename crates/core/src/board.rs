@@ -127,6 +127,57 @@ impl Board {
         Ok(Board { cols, face_down, stock: Vec::new(), completed: 0 })
     }
 
+    /// Build a board from a full current position that may contain unknown cards.
+    /// Each column is `(face_down, cards)` bottom→top, where `cards` includes the
+    /// face-down cards (which may be `UNKNOWN`) followed by the face-up cards
+    /// (which must be known). The stock's cards may also be `UNKNOWN`. When
+    /// nothing is `UNKNOWN`, the board is fully known and can be solved outright.
+    pub fn from_parts(columns: &[(u8, Vec<Card>)], stock: &[Card]) -> Result<Board, String> {
+        if columns.len() != COLS {
+            return Err(format!("expected {COLS} columns, got {}", columns.len()));
+        }
+        let validate = |card: Card, ctx: &str| -> Result<(), String> {
+            if is_unknown(card) {
+                return Ok(());
+            }
+            let (r, s) = (rank(card), suit(card));
+            if !(1..=13).contains(&r) || s > 3 {
+                return Err(format!("{ctx}: invalid card code {card}"));
+            }
+            Ok(())
+        };
+
+        let mut cols: [Vec<Card>; COLS] = std::array::from_fn(|_| Vec::new());
+        let mut face_down = [0u8; COLS];
+        for (i, (fd, cards)) in columns.iter().enumerate() {
+            let fd = *fd as usize;
+            if fd > cards.len() {
+                return Err(format!(
+                    "column {i}: face_down {fd} exceeds card count {}",
+                    cards.len()
+                ));
+            }
+            for (j, &card) in cards.iter().enumerate() {
+                validate(card, &format!("column {i}"))?;
+                if j >= fd && is_unknown(card) {
+                    return Err(format!("column {i}: a face-up card can't be unknown"));
+                }
+            }
+            cols[i] = cards.clone();
+            face_down[i] = fd as u8;
+        }
+        for &card in stock {
+            validate(card, "stock")?;
+        }
+        Ok(Board { cols, face_down, stock: stock.to_vec(), completed: 0 })
+    }
+
+    /// Whether any card (tableau or stock) is still unknown.
+    pub fn has_unknowns(&self) -> bool {
+        self.cols.iter().flatten().any(|&c| is_unknown(c))
+            || self.stock.iter().any(|&c| is_unknown(c))
+    }
+
     /// Total face-down (unknown) cards remaining — the advisor tries to reduce it.
     pub fn face_down_total(&self) -> u32 {
         self.face_down.iter().map(|&f| f as u32).sum()

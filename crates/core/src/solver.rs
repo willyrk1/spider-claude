@@ -174,6 +174,9 @@ impl Solver {
         const DEPTH_CAP: usize = 30;
 
         let mut b = board.clone();
+        // Discovery is tableau-only: dealing reveals stock cards but is a
+        // committal, user-driven action, so don't let the search deal.
+        b.stock.clear();
         let initial_fd = board.face_down_total();
         let mut visited: HashSet<u64> = HashSet::new();
         let mut path: Vec<Move> = Vec::new();

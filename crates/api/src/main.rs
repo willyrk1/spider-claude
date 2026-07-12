@@ -16,7 +16,7 @@ use axum::{http::StatusCode, routing::get, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 
 use spider_core::board::{Board, Move};
-use spider_core::card::{make_card, rank, suit, Card};
+use spider_core::card::{make_card, rank, suit, Card, UNKNOWN};
 use spider_core::solver::{self, Advice, Solver};
 
 #[tokio::main]
@@ -24,7 +24,8 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/solve", post(solve))
-        .route("/advise", post(advise));
+        .route("/advise", post(advise))
+        .route("/plan", post(plan));
 
     let addr = "127.0.0.1:3000";
     let listener = tokio::net::TcpListener::bind(addr)
@@ -308,4 +309,154 @@ async fn advise(
         empties: advice.empties,
         note,
     }))
+}
+
+// ---- Track & solve (deck-based, discover-or-solve) ----
+
+#[derive(Deserialize)]
+struct PlanColumn {
+    #[serde(default)]
+    face_down: u8,
+    /// Full column bottom→top; each entry is a card or `null` (unknown).
+    #[serde(default)]
+    cards: Vec<Option<CardInput>>,
+}
+
+/// The current position, with `null` for any card still unknown (face-down
+/// cards and undealt stock). When nothing is null, it's solved outright.
+#[derive(Deserialize)]
+struct PlanRequest {
+    suits: u8,
+    columns: Vec<PlanColumn>,
+    #[serde(default)]
+    stock: Vec<Option<CardInput>>,
+    #[serde(default = "default_advise_nodes")]
+    advise_nodes: u64,
+    #[serde(default = "default_nodes")]
+    solve_nodes: u64,
+}
+
+#[derive(Serialize)]
+struct PlanResponse {
+    /// "discover" (uncover more cards), "solve" (full solution), or "stuck".
+    phase: String,
+    moves: Vec<MoveDto>,
+    note: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uncovers: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verified: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    winning_config: Option<ConfigDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nodes_searched: Option<u64>,
+}
+
+fn to_card(c: &Option<CardInput>, suits: u8) -> Result<Card, String> {
+    match c {
+        None => Ok(UNKNOWN),
+        Some(ci) => {
+            if !(1..=13).contains(&ci.rank) || ci.suit >= suits {
+                return Err(format!(
+                    "rank {} suit {} is invalid for {}-suit",
+                    ci.rank, ci.suit, suits
+                ));
+            }
+            Ok(make_card(ci.rank, ci.suit))
+        }
+    }
+}
+
+async fn plan(Json(req): Json<PlanRequest>) -> Result<Json<PlanResponse>, (StatusCode, String)> {
+    if !matches!(req.suits, 1 | 2 | 4) {
+        return Err((StatusCode::BAD_REQUEST, "suits must be 1, 2, or 4".into()));
+    }
+    if req.columns.len() != 10 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("expected 10 columns, got {}", req.columns.len()),
+        ));
+    }
+
+    let mut columns: Vec<(u8, Vec<Card>)> = Vec::with_capacity(10);
+    for (i, col) in req.columns.iter().enumerate() {
+        let mut cards = Vec::with_capacity(col.cards.len());
+        for c in &col.cards {
+            cards.push(to_card(c, req.suits).map_err(|e| (StatusCode::BAD_REQUEST, format!("column {i}: {e}")))?);
+        }
+        columns.push((col.face_down, cards));
+    }
+    let mut stock = Vec::with_capacity(req.stock.len());
+    for c in &req.stock {
+        stock.push(to_card(c, req.suits).map_err(|e| (StatusCode::BAD_REQUEST, format!("stock: {e}")))?);
+    }
+
+    let board = Board::from_parts(&columns, &stock).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    if board.has_unknowns() {
+        // Discovery: uncover more face-down cards.
+        let b = board.clone();
+        let advice: Advice = tokio::task::spawn_blocking(move || Solver::advise(&b, req.advise_nodes))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let (phase, note) = if advice.moves.is_empty() {
+            (
+                "stuck",
+                "No tableau move uncovers a new card. If the stock still has cards, deal a row and fill in the newly dealt cards; otherwise you're stuck.".to_string(),
+            )
+        } else {
+            (
+                "discover",
+                format!(
+                    "Play {} move(s) to uncover {} face-down card(s), then fill them in and continue.",
+                    advice.moves.len(),
+                    advice.uncovers
+                ),
+            )
+        };
+        return Ok(Json(PlanResponse {
+            phase: phase.to_string(),
+            moves: advice.moves.iter().map(move_dto).collect(),
+            note,
+            uncovers: Some(advice.uncovers),
+            verified: None,
+            winning_config: None,
+            nodes_searched: None,
+        }));
+    }
+
+    // Fully known → solve the rest.
+    let solve_board = board.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        Solver::solve_portfolio(&solve_board, req.solve_nodes, solver::DEFAULT_PORTFOLIO)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match result.moves {
+        Some(moves) => {
+            let mut check = board.clone();
+            for &m in &moves {
+                check.make(m);
+            }
+            Ok(Json(PlanResponse {
+                phase: "solve".to_string(),
+                note: format!("Everything is known — here is a {}-move winning line.", moves.len()),
+                moves: moves.iter().map(move_dto).collect(),
+                uncovers: None,
+                verified: Some(check.is_won()),
+                winning_config: result.winning_config.map(|(weight, fdw)| ConfigDto { weight, fdw }),
+                nodes_searched: Some(result.nodes),
+            }))
+        }
+        None => Ok(Json(PlanResponse {
+            phase: "stuck".to_string(),
+            note: "The position is fully known but no winning line was found within budget.".to_string(),
+            moves: Vec::new(),
+            uncovers: None,
+            verified: None,
+            winning_config: None,
+            nodes_searched: Some(result.nodes),
+        })),
+    }
 }
