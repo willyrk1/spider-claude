@@ -83,6 +83,16 @@ export default function TrackSolve() {
     setDrafts({});
   }
 
+  /** Undo the last recorded step (a reveal, a move, or a deal). Repeatable. */
+  function undo() {
+    if (log.length === 0) return;
+    setLog((l) => l.slice(0, -1));
+    setResp(null);
+    setError(null);
+    setStates(null);
+    setDrafts({});
+  }
+
   function onCopySession() {
     const text = serializeTrack(suits, log);
     setSessionText(text);
@@ -186,7 +196,9 @@ export default function TrackSolve() {
       <p className="hint">
         Track a real game as you go. Type in the face-up cards you can see; ask
         for <b>next steps</b> to uncover more; fill in each revealed <b>?</b>{' '}
-        card; <b>deal a row</b> when stuck. Once every card is known, it returns
+        card; <b>deal a row</b> when stuck. <b>↶ Undo</b> reverses the last step
+        (a mistyped card, a move, or a deal) — press it repeatedly to back out of
+        a dead end and try a different line. Once every card is known, it returns
         the full winning solution.
       </p>
 
@@ -204,6 +216,9 @@ export default function TrackSolve() {
         </button>
         <button onClick={dealRow} disabled={!canDeal} title={canDeal ? '' : 'Deal needs cards in the stock, no empty columns, and no unfilled ? cards'}>
           Deal a row ({board.stockCount})
+        </button>
+        <button onClick={undo} disabled={log.length === 0} title="Undo the last step (reveal, move, or deal)">
+          ↶ Undo
         </button>
         <button onClick={reset}>New game</button>
       </div>

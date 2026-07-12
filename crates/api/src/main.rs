@@ -402,7 +402,7 @@ async fn plan(Json(req): Json<PlanRequest>) -> Result<Json<PlanResponse>, (Statu
         let (phase, note) = if advice.moves.is_empty() {
             (
                 "stuck",
-                "No tableau move uncovers a new card. If the stock still has cards, deal a row and fill in the newly dealt cards; otherwise you're stuck.".to_string(),
+                "No tableau move uncovers a new card. Deal a row to reveal stock cards, or use ↶ Undo to back up and try a different line.".to_string(),
             )
         } else {
             (
@@ -451,7 +451,7 @@ async fn plan(Json(req): Json<PlanRequest>) -> Result<Json<PlanResponse>, (Statu
         }
         None => Ok(Json(PlanResponse {
             phase: "stuck".to_string(),
-            note: "The position is fully known but no winning line was found within budget.".to_string(),
+            note: "The position is fully known, but no winning line was found in the budget — a filled-in card may be wrong, or the line you played may be a dead end. Try ↶ Undo, or raise the budget.".to_string(),
             moves: Vec::new(),
             uncovers: None,
             verified: None,
