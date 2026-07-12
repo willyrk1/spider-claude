@@ -19,6 +19,32 @@ pub enum Move {
     Deal,
 }
 
+/// Records a completed K..A run that was removed, so `undo` can put it back.
+/// The 13 removed cards are always K,Q,..,A of `suit`, so the suit is all we
+/// need to reconstruct them.
+#[derive(Clone, Copy)]
+pub struct Completion {
+    col: u8,
+    suit: u8,
+    flipped: bool, // whether removing the run flipped a face-down card up
+}
+
+/// Everything needed to reverse one `make`, so the search can backtrack in
+/// place instead of cloning the board per move.
+pub enum Undo {
+    Tableau {
+        from: u8,
+        to: u8,
+        count: u8,
+        flipped_from: bool,
+        completion: Option<Completion>,
+    },
+    Deal {
+        // completions[c] is set if column c completed a run during the deal.
+        completions: [Option<Completion>; COLS],
+    },
+}
+
 #[derive(Clone)]
 pub struct Board {
     /// Each column, bottom of the pile at index 0, top (playable end) at the back.
@@ -143,59 +169,141 @@ impl Board {
         }
     }
 
-    /// Apply a move in place. Assumes the move came from `gen_moves`.
-    pub fn apply(&mut self, m: Move) {
+    /// Apply a move in place, returning an `Undo` that exactly reverses it.
+    /// Assumes the move came from `gen_moves`.
+    pub fn make(&mut self, m: Move) -> Undo {
         match m {
+            Move::Tableau { from, to, count } => {
+                let (f, t, k) = (from as usize, to as usize, count as usize);
+                let n = self.cols[f].len();
+                // Move the top `k` cards f -> t via a stack buffer (no aliasing,
+                // no heap; a run is at most 13 cards).
+                let mut buf = [0u8; 13];
+                buf[..k].copy_from_slice(&self.cols[f][n - k..n]);
+                self.cols[f].truncate(n - k);
+                for &card in &buf[..k] {
+                    self.cols[t].push(card);
+                }
+                let flipped_from = self.flip_if_needed(f);
+                let completion = self.try_complete(t);
+                Undo::Tableau {
+                    from,
+                    to,
+                    count,
+                    flipped_from,
+                    completion,
+                }
+            }
             Move::Deal => {
                 for c in 0..COLS {
                     let card = self.stock.pop().expect("stock non-empty");
                     self.cols[c].push(card);
                 }
+                let mut completions = [None; COLS];
                 for c in 0..COLS {
-                    self.check_complete(c);
+                    completions[c] = self.try_complete(c);
+                }
+                Undo::Deal { completions }
+            }
+        }
+    }
+
+    /// Reverse a previously `make`d move, restoring the exact prior state.
+    pub fn undo(&mut self, u: &Undo) {
+        match *u {
+            Undo::Tableau {
+                from,
+                to,
+                count,
+                flipped_from,
+                completion,
+            } => {
+                let (f, t, k) = (from as usize, to as usize, count as usize);
+                // Reverse in the opposite order to `make`: completion, then the
+                // source flip, then the card transfer.
+                if let Some(comp) = completion {
+                    self.uncomplete(comp);
+                }
+                if flipped_from {
+                    self.face_down[f] += 1;
+                }
+                let n = self.cols[t].len();
+                let mut buf = [0u8; 13];
+                buf[..k].copy_from_slice(&self.cols[t][n - k..n]);
+                self.cols[t].truncate(n - k);
+                for &card in &buf[..k] {
+                    self.cols[f].push(card);
                 }
             }
-            Move::Tableau { from, to, count } => {
-                let (from, to, count) = (from as usize, to as usize, count as usize);
-                let n = self.cols[from].len();
-                let moved: Vec<Card> = self.cols[from][n - count..].to_vec();
-                self.cols[from].truncate(n - count);
-                self.cols[to].extend_from_slice(&moved);
-                self.flip_if_needed(from);
-                self.check_complete(to);
+            Undo::Deal { completions } => {
+                // Undo completions first (they may have consumed dealt cards),
+                // then return one card per column to the stock. Reverse column
+                // order so the stock's original order is restored exactly.
+                for c in (0..COLS).rev() {
+                    if let Some(comp) = completions[c] {
+                        self.uncomplete(comp);
+                    }
+                }
+                for c in (0..COLS).rev() {
+                    let card = self.cols[c].pop().expect("dealt card present");
+                    self.stock.push(card);
+                }
             }
         }
     }
 
     /// If the top card of a column is now face-down, flip it face-up.
+    /// Returns whether a flip happened (so `undo` can reverse it).
     #[inline]
-    fn flip_if_needed(&mut self, c: usize) {
+    fn flip_if_needed(&mut self, c: usize) -> bool {
         let fd = self.face_down[c] as usize;
         if fd > 0 && self.cols[c].len() == fd {
             self.face_down[c] -= 1;
+            true
+        } else {
+            false
         }
     }
 
-    /// Remove a completed K..A same-suit run from the top of column `c`.
-    fn check_complete(&mut self, c: usize) {
+    /// Remove a completed K..A same-suit run from the top of column `c`, if any.
+    /// Returns a `Completion` record when a run was removed.
+    fn try_complete(&mut self, c: usize) -> Option<Completion> {
         let n = self.cols[c].len();
         if n < 13 {
-            return;
+            return None;
         }
         // The 13 candidate cards must all be face up.
         if (n - 13) < self.face_down[c] as usize {
-            return;
+            return None;
         }
         let s = suit(self.cols[c][n - 13]);
         for i in 0..13 {
             let card = self.cols[c][n - 13 + i];
             if suit(card) != s || rank(card) != (13 - i) as u8 {
-                return;
+                return None;
             }
         }
         self.cols[c].truncate(n - 13);
         self.completed += 1;
-        self.flip_if_needed(c);
+        let flipped = self.flip_if_needed(c);
+        Some(Completion {
+            col: c as u8,
+            suit: s,
+            flipped,
+        })
+    }
+
+    /// Reverse a `try_complete`: restore the removed K..A run and any flip.
+    fn uncomplete(&mut self, comp: Completion) {
+        let c = comp.col as usize;
+        if comp.flipped {
+            self.face_down[c] += 1;
+        }
+        // Push K (bottom) down to A (top) to reproduce the removed run.
+        for r in (1..=13u8).rev() {
+            self.cols[c].push(make_card(r, comp.suit));
+        }
+        self.completed -= 1;
     }
 
     /// Canonical hash for the transposition table.
