@@ -69,6 +69,10 @@ Response: `{ solved, verified, quality, move_count, winning_config,
 nodes_searched, moves: [{type:"tableau",from,to,count} | {type:"deal"}],
 initial_board? }`. The solution is self-verified server-side by replaying it.
 
+Both `/solve` and `/plan` accept `"allow_deal_with_empty"?: false` — a rule
+variant. By default (and per standard Spider) dealing a new row is illegal while
+any column is empty; set it `true` to permit it.
+
 > **Windows + GNU toolchain note:** building the API compiles `tokio`'s
 > `windows-sys`, which needs `dlltool.exe` from a full MinGW-w64 install (e.g.
 > WinLibs). The core/CLI don't need it. On the MSVC toolchain this isn't an issue.

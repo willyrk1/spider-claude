@@ -49,6 +49,10 @@ struct SolveRequest {
     /// Include the dealt board in the response (so a UI can render it).
     #[serde(default)]
     include_board: bool,
+    /// Rule variant: allow dealing a new row while columns are empty (default
+    /// false — the standard rule forbids it).
+    #[serde(default)]
+    allow_deal_with_empty: bool,
 }
 
 fn default_nodes() -> u64 {
@@ -117,7 +121,8 @@ async fn solve(
 }
 
 fn run_solve(req: SolveRequest) -> SolveResponse {
-    let board = Board::deal(req.suits, req.seed);
+    let mut board = Board::deal(req.suits, req.seed);
+    board.allow_deal_with_empty = req.allow_deal_with_empty;
     let initial_board = if req.include_board {
         Some(board_dto(&board))
     } else {
@@ -334,6 +339,10 @@ struct PlanRequest {
     advise_nodes: u64,
     #[serde(default = "default_nodes")]
     solve_nodes: u64,
+    /// Rule variant: allow dealing a new row while columns are empty (default
+    /// false — the standard rule forbids it).
+    #[serde(default)]
+    allow_deal_with_empty: bool,
 }
 
 #[derive(Serialize)]
@@ -391,7 +400,8 @@ async fn plan(Json(req): Json<PlanRequest>) -> Result<Json<PlanResponse>, (Statu
         stock.push(to_card(c, req.suits).map_err(|e| (StatusCode::BAD_REQUEST, format!("stock: {e}")))?);
     }
 
-    let board = Board::from_parts(&columns, &stock).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let mut board = Board::from_parts(&columns, &stock).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    board.allow_deal_with_empty = req.allow_deal_with_empty;
 
     if board.has_unknowns() {
         // Discovery: uncover more face-down cards.

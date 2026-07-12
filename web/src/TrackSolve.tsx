@@ -25,6 +25,11 @@ import {
 
 const STORAGE_KEY = 'spider-track-session';
 
+// Standard Spider rule: you can't deal a new row while any column is empty.
+// Flip to true to allow the variant (kept off by default; the API/engine
+// default matches).
+const ALLOW_DEAL_WITH_EMPTY_COLUMNS = false;
+
 /** Restore the saved session (initial deal + actions) from this browser. */
 function loadSaved(): { suits: number; deal: InitialDeal; actions: Action[] } | null {
   try {
@@ -82,7 +87,8 @@ export default function TrackSolve() {
 
   const unfilled = hasUnrevealed(board, deal);
   const emptyColumns = board.columns.some((c) => c.cards.length === 0);
-  const canDeal = stockRemaining(board) > 0 && !emptyColumns && !unfilled;
+  const canDeal =
+    stockRemaining(board) > 0 && (ALLOW_DEAL_WITH_EMPTY_COLUMNS || !emptyColumns) && !unfilled;
 
   function reset() {
     setDeal(newInitialDeal());
@@ -155,7 +161,12 @@ export default function TrackSolve() {
     setPlaying(false);
     setStates(null);
     try {
-      const r = await plan({ suits, columns: planColumns(board, deal), stock: planStock(board, deal) });
+      const r = await plan({
+        suits,
+        columns: planColumns(board, deal),
+        stock: planStock(board, deal),
+        allow_deal_with_empty: ALLOW_DEAL_WITH_EMPTY_COLUMNS,
+      });
       setResp(r);
       if (r.phase === 'solve') {
         setStates(computeStates(boardToGameState(board, deal), r.moves));

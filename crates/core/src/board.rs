@@ -55,6 +55,10 @@ pub struct Board {
     pub stock: Vec<Card>,
     /// Count of completed K..A suit runs removed from play (win at 8).
     pub completed: u8,
+    /// Rule variant: if false (the standard rule and the default), dealing a new
+    /// row from the stock is illegal while any column is empty. Set true to allow
+    /// it. Copied by `clone`; unaffected by `make`/`undo`.
+    pub allow_deal_with_empty: bool,
 }
 
 impl Board {
@@ -91,7 +95,7 @@ impl Board {
         let stock = deck[idx..].to_vec(); // remaining 50 cards
         debug_assert_eq!(stock.len(), 50);
 
-        Board { cols, face_down, stock, completed: 0 }
+        Board { cols, face_down, stock, completed: 0, allow_deal_with_empty: false }
     }
 
     #[inline]
@@ -124,7 +128,7 @@ impl Board {
             cols[i] = v;
             face_down[i] = *fd;
         }
-        Ok(Board { cols, face_down, stock: Vec::new(), completed: 0 })
+        Ok(Board { cols, face_down, stock: Vec::new(), completed: 0, allow_deal_with_empty: false })
     }
 
     /// Build a board from a full current position that may contain unknown cards.
@@ -169,7 +173,7 @@ impl Board {
         for &card in stock {
             validate(card, "stock")?;
         }
-        Ok(Board { cols, face_down, stock: stock.to_vec(), completed: 0 })
+        Ok(Board { cols, face_down, stock: stock.to_vec(), completed: 0, allow_deal_with_empty: false })
     }
 
     /// Whether any card (tableau or stock) is still unknown.
@@ -265,8 +269,11 @@ impl Board {
             }
         }
 
-        // Dealing is only legal when no column is empty.
-        if !self.stock.is_empty() && self.cols.iter().all(|c| !c.is_empty()) {
+        // Dealing needs stock, and by the standard rule is illegal while any
+        // column is empty (unless the `allow_deal_with_empty` variant is on).
+        if !self.stock.is_empty()
+            && (self.allow_deal_with_empty || self.cols.iter().all(|c| !c.is_empty()))
+        {
             out.push(Move::Deal);
         }
     }
@@ -460,5 +467,31 @@ impl Board {
             self.completed
         ));
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deal_forbidden_with_empty_column_unless_variant_enabled() {
+        // A dealt game (stock non-empty), then empty out a column.
+        let mut board = Board::deal(1, 1);
+        board.cols[0].clear();
+        board.face_down[0] = 0;
+        assert!(!board.stock.is_empty());
+        assert!(board.cols.iter().any(|c| c.is_empty()));
+
+        // Default (standard) rule: no Deal while a column is empty.
+        let mut moves = Vec::new();
+        board.gen_moves(&mut moves);
+        assert!(!moves.contains(&Move::Deal));
+
+        // Variant enabled: dealing becomes legal.
+        board.allow_deal_with_empty = true;
+        let mut moves = Vec::new();
+        board.gen_moves(&mut moves);
+        assert!(moves.contains(&Move::Deal));
     }
 }

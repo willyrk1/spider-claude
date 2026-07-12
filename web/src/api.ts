@@ -56,6 +56,7 @@ export async function plan(params: {
   suits: number;
   columns: PlanColumn[];
   stock: PlanCard[];
+  allow_deal_with_empty?: boolean;
 }): Promise<PlanResponse> {
   const res = await fetch('/api/plan', {
     method: 'POST',
