@@ -8,6 +8,8 @@ A React + TypeScript front end for the Spider Solitaire solver. Two modes:
   only see the face-up cards. Enter each column's face-down count and face-up
   cards; the server recommends moves that best uncover face-down cards. Reveal
   the exposed cards, update the board, and ask again. (Uses `POST /advise`.)
+  The board auto-saves to the browser, and a **Save / load session** panel lets
+  you copy the board to text and paste it back later to resume or share.
 
 ## Run
 

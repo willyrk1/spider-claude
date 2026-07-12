@@ -1,11 +1,32 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Board } from './Board';
 import { advise, type AdviseResponse } from './api';
-import { describeMove, displayState, parseCards, type Move } from './game';
+import {
+  describeMove,
+  displayState,
+  parseCards,
+  parseSession,
+  serializeSession,
+  type Move,
+} from './game';
 
 type ColInput = { faceDown: number; text: string };
 
 const EMPTY_COLS: ColInput[] = Array.from({ length: 10 }, () => ({ faceDown: 0, text: '' }));
+
+const STORAGE_KEY = 'spider-advisor-session';
+
+/** Restore the last board from this browser's localStorage, if any. */
+function loadSaved(): { suits: number; cols: ColInput[] } | null {
+  try {
+    const text = localStorage.getItem(STORAGE_KEY);
+    if (!text) return null;
+    const { session } = parseSession(text);
+    return session ? { suits: session.suits, cols: session.cols } : null;
+  } catch {
+    return null;
+  }
+}
 
 // A small mid-game snapshot to try the advisor on. Column 1's 5♠ can move onto
 // column 0's 6♠, uncovering a face-down card.
@@ -24,11 +45,22 @@ const EXAMPLE: ColInput[] = [
 
 /** Play-along advisor: enter what you can see, get recommended moves. */
 export default function Advisor() {
-  const [suits, setSuits] = useState(4);
-  const [cols, setCols] = useState<ColInput[]>(EXAMPLE);
+  const [suits, setSuits] = useState<number>(() => loadSaved()?.suits ?? 4);
+  const [cols, setCols] = useState<ColInput[]>(() => loadSaved()?.cols ?? EXAMPLE);
   const [resp, setResp] = useState<AdviseResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sessionText, setSessionText] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  // Auto-save the board to this browser so a refresh doesn't lose it.
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, serializeSession({ suits, cols }));
+    } catch {
+      /* ignore quota / privacy-mode errors */
+    }
+  }, [suits, cols]);
 
   const parsed = cols.map((c) => parseCards(c.text));
   const firstBadCol = parsed.findIndex((p) => p.error);
@@ -36,6 +68,32 @@ export default function Advisor() {
   function setCol(i: number, patch: Partial<ColInput>) {
     setCols((cs) => cs.map((c, j) => (j === i ? { ...c, ...patch } : c)));
     setResp(null);
+  }
+
+  function onCopySession() {
+    const text = serializeSession({ suits, cols });
+    setSessionText(text);
+    navigator.clipboard?.writeText(text).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      },
+      () => {
+        /* clipboard blocked — the text is in the box to copy manually */
+      },
+    );
+  }
+
+  function onLoadSession() {
+    const { session, error: err } = parseSession(sessionText);
+    if (err || !session) {
+      setError(`Couldn't load session: ${err ?? 'invalid'}`);
+      return;
+    }
+    setSuits(session.suits);
+    setCols(session.cols);
+    setResp(null);
+    setError(null);
   }
 
   async function onAdvise() {
@@ -114,6 +172,28 @@ export default function Advisor() {
           </div>
         ))}
       </div>
+
+      <details className="session">
+        <summary>💾 Save / load session</summary>
+        <p className="hint">
+          Copy this text to save or share your game; paste it back and{' '}
+          <b>Load from text</b> to restore. Your board is also auto-saved in this
+          browser, so a refresh won't lose it.
+        </p>
+        <div className="session-actions">
+          <button onClick={onCopySession}>
+            {copied ? 'Copied ✓' : 'Copy current session'}
+          </button>
+          <button onClick={onLoadSession}>Load from text</button>
+        </div>
+        <textarea
+          className="session-text"
+          rows={8}
+          value={sessionText}
+          onChange={(e) => setSessionText(e.target.value)}
+          placeholder="Click 'Copy current session' to fill this box, or paste a previously-saved session here and click 'Load from text'."
+        />
+      </details>
 
       {error && <div className="banner error">⚠ {error}</div>}
 

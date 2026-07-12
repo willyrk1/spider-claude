@@ -98,6 +98,30 @@ button.primary { background: var(--accent); color: #23303a; border-color: var(--
 .move-list { margin: 8px 0 4px; padding-left: 22px; line-height: 1.7; }
 .board-title { font-size: 14px; color: var(--muted); margin: 18px 0 6px; font-weight: 600; }
 
+/* Session save / load */
+.session {
+  margin: 14px 0;
+  border: 1px solid var(--panel-line);
+  border-radius: 8px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.session summary { cursor: pointer; font-size: 14px; user-select: none; }
+.session .hint { margin: 8px 0; }
+.session-actions { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+.session-text {
+  width: 100%;
+  resize: vertical;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--panel-line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 /* Stats */
 .stats { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
 .stat { background: var(--panel); border: 1px solid var(--panel-line); border-radius: 8px; padding: 8px 12px; min-width: 96px; }

@@ -138,6 +138,37 @@ export function parseCards(text: string): { cards: Card[]; error?: string } {
   return { cards };
 }
 
+// ---- Session save / load (advisor mode) ----
+
+export type Session = { suits: number; cols: { faceDown: number; text: string }[] };
+
+/** A human-readable, copy-pasteable snapshot of an advisor session. */
+export function serializeSession(s: Session): string {
+  const lines = [`suits: ${s.suits}`];
+  for (const c of s.cols) lines.push(`${c.faceDown} | ${c.text.trim()}`);
+  return lines.join('\n');
+}
+
+/** Parse a session string produced by `serializeSession` (whitespace-tolerant). */
+export function parseSession(text: string): { session?: Session; error?: string } {
+  const lines = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+  if (lines.length === 0) return { error: 'nothing to load' };
+  const sm = lines[0].match(/^suits:\s*([124])$/i);
+  if (!sm) return { error: 'first line must be "suits: 1", "suits: 2", or "suits: 4"' };
+  const colLines = lines.slice(1);
+  if (colLines.length !== 10) {
+    return { error: `expected 10 column lines after "suits:", got ${colLines.length}` };
+  }
+  const cols = [];
+  for (let i = 0; i < 10; i++) {
+    const [left, right = ''] = colLines[i].split('|');
+    const fd = parseInt(left.trim(), 10);
+    if (Number.isNaN(fd) || fd < 0) return { error: `column ${i}: bad face-down count` };
+    cols.push({ faceDown: fd, text: right.trim() });
+  }
+  return { session: { suits: Number(sm[1]), cols } };
+}
+
 /**
  * Build a renderable state from what a player typed: face-down cards become
  * placeholder backs (their identity is unknown), followed by the face-up cards.
