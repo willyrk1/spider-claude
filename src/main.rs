@@ -22,7 +22,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let suits: u8 = arg(&args, "--suits").unwrap_or(1);
     let seed: u64 = arg(&args, "--seed").unwrap_or(42);
-    let node_limit: u64 = arg(&args, "--nodes").unwrap_or(5_000_000);
+    let node_limit: u64 = arg(&args, "--nodes").unwrap_or(20_000_000);
     let quiet = args.iter().any(|a| a == "--quiet");
 
     if !matches!(suits, 1 | 2 | 4) {
@@ -47,12 +47,31 @@ fn main() {
 
     match result.moves {
         Some(moves) => {
+            let quality = if result.converged {
+                "shortest found (search converged)"
+            } else {
+                "shortest found so far — raise --nodes to shorten further"
+            };
             println!(
-                "SOLVED in {} moves — searched {} nodes in {:.2?}",
+                "SOLVED in {} moves [{}] — searched {} nodes in {:.2?}",
                 moves.len(),
+                quality,
                 result.nodes,
                 elapsed
             );
+
+            // Self-check: replay the solution on a fresh deal and confirm it wins.
+            let mut check = Board::deal(suits, seed);
+            for &m in &moves {
+                check.make(m);
+            }
+            if check.is_won() {
+                println!("verified: replaying the solution wins ✓");
+            } else {
+                eprintln!("BUG: reported solution does NOT win when replayed!");
+                std::process::exit(1);
+            }
+
             if !quiet {
                 println!("\nSolution:");
                 for (i, m) in moves.iter().enumerate() {

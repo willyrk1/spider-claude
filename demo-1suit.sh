@@ -10,7 +10,7 @@
 set -euo pipefail
 
 SEED="${1:-42}"
-NODES="${2:-5000000}"
+NODES="${2:-20000000}"
 MOVES_TO_SHOW=15
 
 # Locate the release binary (.exe on Windows/Git Bash), building it if needed.
