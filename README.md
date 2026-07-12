@@ -36,10 +36,14 @@ crates/
 ├── core/   spider-core — pure engine (card, board, solver, rng); no I/O, no deps
 ├── cli/    spider-cli  — the `spider` binary; a thin front end over the core
 └── api/    spider-api  — HTTP API (axum/tokio) exposing the solver as JSON
+web/        React + TypeScript UI that calls the API (see web/README.md)
 ```
 
 `cargo build` (no `-p`) builds only the zero-dependency core + CLI; the API is
 built explicitly (`-p spider-api`). A WASM build could slot in the same way.
+
+A browser UI lives in [`web/`](web/): it deals a game via the API, renders the
+board, and plays the solver's solution move by move.
 
 ## HTTP API
 

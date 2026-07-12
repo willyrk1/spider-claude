@@ -63,6 +63,10 @@ struct CardDto {
 #[derive(Serialize)]
 struct BoardDto {
     columns: Vec<Vec<CardDto>>,
+    /// The undealt stock, in Vec order (a `deal` pops from the end), so a client
+    /// can replay `deal` moves exactly. `face_up` is meaningless here (always
+    /// false); the cards become face-up when dealt.
+    stock: Vec<CardDto>,
     stock_count: usize,
 }
 
@@ -183,8 +187,18 @@ fn board_dto(b: &Board) -> BoardDto {
                 .collect()
         })
         .collect();
+    let stock = b
+        .stock
+        .iter()
+        .map(|&card| CardDto {
+            rank: rank(card),
+            suit: suit(card),
+            face_up: false,
+        })
+        .collect();
     BoardDto {
         columns,
+        stock,
         stock_count: b.stock.len(),
     }
 }

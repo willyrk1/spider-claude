@@ -1,0 +1,134 @@
+:root {
+  --card-w: 66px;
+  --card-h: 92px;
+  --felt: #0f5132;
+  --felt-2: #0b3f28;
+  --ink: #e8eef0;
+  --muted: #9fb3ad;
+  --accent: #ffcf5c;
+  --panel: #12241d;
+  --panel-line: #244c3d;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: var(--ink);
+  background: radial-gradient(1200px 600px at 50% -10%, var(--felt), var(--felt-2)) fixed;
+  min-height: 100vh;
+}
+
+.app { max-width: 1100px; margin: 0 auto; padding: 24px 20px 60px; }
+
+header h1 { margin: 0 0 4px; font-size: 26px; }
+.tagline { margin: 0; color: var(--muted); font-size: 14px; }
+
+/* Controls */
+.controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  margin: 20px 0;
+  flex-wrap: wrap;
+}
+.controls label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.controls select, .controls input[type='number'] {
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--panel-line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+  min-width: 90px;
+}
+button {
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--panel-line);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 14px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary { background: var(--accent); color: #23303a; border-color: var(--accent); font-weight: 600; }
+
+/* Banners */
+.banner { padding: 10px 14px; border-radius: 8px; margin: 12px 0; font-size: 14px; }
+.banner.error { background: #4a1d1d; border: 1px solid #7a2b2b; }
+.banner.warn { background: #4a3d1d; border: 1px solid #7a682b; }
+.empty-hint { color: var(--muted); margin-top: 28px; }
+
+/* Stats */
+.stats { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+.stat { background: var(--panel); border: 1px solid var(--panel-line); border-radius: 8px; padding: 8px 12px; min-width: 96px; }
+.stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.stat-value { font-size: 15px; margin-top: 2px; }
+
+/* Player */
+.player-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.player-bar .counter { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: 6px; }
+.player-bar .speed { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-left: auto; }
+.scrubber { width: 100%; margin: 4px 0 2px; accent-color: var(--accent); }
+.move-desc { font-size: 14px; margin: 6px 0 14px; }
+.move-desc .completed { color: var(--muted); }
+
+/* Board */
+.board {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding: 10px 4px 20px;
+}
+.column {
+  position: relative;
+  width: var(--card-w);
+  min-height: var(--card-h);
+  flex: 0 0 var(--card-w);
+  border-radius: 8px;
+}
+.column.active { box-shadow: 0 0 0 2px var(--accent); }
+.col-label { position: absolute; top: -18px; width: 100%; text-align: center; font-size: 11px; color: var(--muted); }
+.empty-slot {
+  position: absolute; top: 0; width: var(--card-w); height: var(--card-h);
+  border: 1.5px dashed #3c6a57; border-radius: 8px;
+}
+
+.card {
+  position: absolute;
+  left: 0;
+  width: var(--card-w);
+  height: var(--card-h);
+  border-radius: 7px;
+  background: #fdfdfb;
+  border: 1px solid #c9c9c9;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+.card.red { color: #c62828; }
+.card.black { color: #1a1a1a; }
+.card .corner { position: absolute; top: 4px; left: 6px; font-size: 15px; font-weight: 700; line-height: 1; }
+.card .pip { position: absolute; bottom: 6px; right: 8px; font-size: 20px; opacity: 0.85; }
+.card.down {
+  background: repeating-linear-gradient(45deg, #22557a, #22557a 6px, #1c476a 6px, #1c476a 12px);
+  border-color: #12314a;
+}
+
+/* Stock pile */
+.stock-pile {
+  position: relative;
+  margin-left: 8px;
+  width: var(--card-w);
+  height: var(--card-h);
+  flex: 0 0 var(--card-w);
+  border-radius: 8px;
+  border: 1.5px solid #3c6a57;
+  background: rgba(255, 255, 255, 0.04);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+}
+.stock-pile.active { box-shadow: 0 0 0 2px var(--accent); }
+.stock-count { font-size: 22px; font-weight: 700; }
+.stock-sub { font-size: 10px; color: var(--muted); text-align: center; }
