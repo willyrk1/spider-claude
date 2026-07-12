@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
 use crate::board::{Board, Move, COLS};
-use crate::card::{rank, suit};
+use crate::card::{is_unknown, rank, suit};
 
 /// Default weight on the heuristic. `w = 1` is optimal but slow with a weak
 /// heuristic; larger `w` trades a little length for a lot of speed (weighted A*)
@@ -165,21 +165,25 @@ impl Solver {
         }
     }
 
-    /// Partial-information advisor. Over the *visible* cards only — no deals, and
-    /// unknown (face-down) cards can't be moved — search for a short sequence
-    /// that best improves the position, chiefly by uncovering face-down cards.
-    /// Returns the recommended plan and what it achieves; re-run after revealing
-    /// the newly-exposed cards.
+    /// Partial-information advisor. Searches for a short sequence that reveals
+    /// *unknown* cards — exposing a card you already know teaches you nothing, so
+    /// only newly-learned (unknown) cards count. If no tableau move can reach an
+    /// unknown, it recommends dealing a row (which reveals unknown stock cards).
+    /// Re-run after revealing the newly-exposed cards.
     pub fn advise(board: &Board, node_limit: u64) -> Advice {
-        // Discovery is tableau-only: dealing reveals stock cards but is a
-        // committal, user-driven action, so don't let the search deal.
+        let start_completed = board.completed;
+        // The tableau search never deals (a deal is a committal, user-driven
+        // action); clearing the stock keeps `gen_moves` from offering one.
         let mut start = board.clone();
         start.stock.clear();
-        let initial_fd = board.face_down_total();
 
-        // Breadth-first over tableau moves so the path to any state is the
-        // *shortest* one — the recommended plan never takes a redundant detour
-        // (e.g. A→B→C where A→C would do).
+        // Reward: unknown cards now face-up, plus completed runs (which remove
+        // cards and can uncover more). Breadth-first, so the path to the best
+        // state is the shortest — no redundant detours.
+        let reward = |b: &Board| -> i64 {
+            b.exposed_unknowns() as i64 + (b.completed - start_completed) as i64 * 20
+        };
+
         let mut arena: Vec<Node> = vec![Node { parent: u32::MAX, mv: Move::Deal }];
         let mut visited: HashSet<u64> = HashSet::new();
         let mut queue: VecDeque<u32> = VecDeque::new();
@@ -188,7 +192,7 @@ impl Solver {
         visited.insert(start.hash());
         queue.push_back(0);
 
-        let mut best_score = advice_score(&start, initial_fd);
+        let mut best_reward = reward(&start); // 0 — nothing exposed yet
         let mut best_idx: u32 = 0;
 
         'bfs: while let Some(idx) = queue.pop_front() {
@@ -204,11 +208,9 @@ impl Solver {
                 if visited.insert(b.hash()) {
                     let ci = arena.len() as u32;
                     arena.push(Node { parent: idx, mv: m });
-                    let sc = advice_score(&b, initial_fd);
-                    // BFS dequeues in nondecreasing depth, so the first node to
-                    // reach a new best score is the shallowest that does.
-                    if sc > best_score {
-                        best_score = sc;
+                    let r = reward(&b);
+                    if r > best_reward {
+                        best_reward = r;
                         best_idx = ci;
                     }
                     queue.push_back(ci);
@@ -217,17 +219,36 @@ impl Solver {
             }
         }
 
-        let moves = path_to(&arena, best_idx);
-        let mut end = start.clone();
-        for &m in &moves {
-            end.make(m);
+        // A tableau plan that reveals something wins.
+        if best_reward > 0 {
+            let moves = path_to(&arena, best_idx);
+            let mut end = start.clone();
+            for &m in &moves {
+                end.make(m);
+            }
+            return Advice {
+                uncovers: end.exposed_unknowns(),
+                completes: (end.completed - start_completed) as u32,
+                empties: end.empty_columns(),
+                moves,
+            };
         }
-        Advice {
-            uncovers: initial_fd - end.face_down_total(),
-            completes: end.completed as u32,
-            empties: end.empty_columns(),
-            moves,
+
+        // Nothing new is reachable on the tableau. Recommend dealing a row if it
+        // would reveal unknown stock cards (and dealing is legal).
+        let can_deal = !board.stock.is_empty()
+            && (board.allow_deal_with_empty || board.cols.iter().all(|c| !c.is_empty()));
+        if can_deal && board.stock.iter().any(|&c| is_unknown(c)) {
+            let next_row = board.stock.iter().take(COLS).filter(|&&c| is_unknown(c)).count() as u32;
+            return Advice {
+                uncovers: next_row,
+                completes: 0,
+                empties: board.empty_columns(),
+                moves: vec![Move::Deal],
+            };
         }
+
+        Advice { uncovers: 0, completes: 0, empties: board.empty_columns(), moves: Vec::new() }
     }
 }
 
@@ -417,16 +438,6 @@ fn reconstruct(arena: &[Node], idx: u32, last: Move) -> Vec<Move> {
     }
     rev.reverse();
     rev
-}
-
-/// Score a partially-known state for the advisor: reward completed runs, then
-/// uncovered face-down cards, then empty columns, then longer built runs.
-fn advice_score(b: &Board, initial_fd: u32) -> i64 {
-    let uncovered = (initial_fd - b.face_down_total()) as i64;
-    let completed = b.completed as i64;
-    let empties = b.empty_columns() as i64;
-    let build = b.run_bonus() as i64;
-    completed * 1000 + uncovered * 100 + empties * 40 + build * 2
 }
 
 /// Generate the legal moves at the current state, ordered best-first so Phase 1

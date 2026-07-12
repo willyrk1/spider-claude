@@ -187,6 +187,22 @@ impl Board {
         self.face_down.iter().map(|&f| f as u32).sum()
     }
 
+    /// Count of face-up cards whose identity is still unknown (uncovered/dealt
+    /// but not yet typed in). The advisor tries to *increase* this — exposing a
+    /// card you already know teaches you nothing.
+    pub fn exposed_unknowns(&self) -> u32 {
+        let mut n = 0;
+        for c in 0..COLS {
+            let fd = self.face_down[c] as usize;
+            for &card in &self.cols[c][fd..] {
+                if is_unknown(card) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     /// Number of empty columns (powerful — they accept any card).
     pub fn empty_columns(&self) -> u32 {
         self.cols.iter().filter(|c| c.is_empty()).count() as u32

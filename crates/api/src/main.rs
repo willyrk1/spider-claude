@@ -409,16 +409,22 @@ async fn plan(Json(req): Json<PlanRequest>) -> Result<Json<PlanResponse>, (Statu
         let advice: Advice = tokio::task::spawn_blocking(move || Solver::advise(&b, req.advise_nodes))
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let is_deal = advice.moves.len() == 1 && matches!(advice.moves[0], Move::Deal);
         let (phase, note) = if advice.moves.is_empty() {
             (
                 "stuck",
-                "No tableau move uncovers a new card. Deal a row to reveal stock cards, or use ↶ Undo to back up and try a different line.".to_string(),
+                "Nothing new can be revealed: no move reaches an unknown card, and there's no stock left to deal. Use ↶ Undo to back up and try a different line.".to_string(),
+            )
+        } else if is_deal {
+            (
+                "discover",
+                "No move uncovers an unknown card — deal a row from the stock (to reach the unknown stock cards), then fill in any newly dealt cards.".to_string(),
             )
         } else {
             (
                 "discover",
                 format!(
-                    "Play {} move(s) to uncover {} face-down card(s), then fill them in and continue.",
+                    "Play {} move(s) to reveal {} unknown card(s), then fill them in and continue.",
                     advice.moves.len(),
                     advice.uncovers
                 ),
