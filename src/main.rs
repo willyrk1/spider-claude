@@ -39,8 +39,16 @@ fn main() {
         println!("\nInitial deal:\n{}", board.render());
     }
 
+    // The DFS can recurse very deep, so run it on a thread with a large stack
+    // rather than the small default main-thread stack.
     let start = Instant::now();
-    let result = Solver::solve(&board, node_limit);
+    let search_board = board.clone();
+    let result = std::thread::Builder::new()
+        .stack_size(1 << 30) // 1 GiB
+        .spawn(move || Solver::solve(&search_board, node_limit))
+        .expect("spawn search thread")
+        .join()
+        .expect("search thread panicked");
     let elapsed = start.elapsed();
 
     match result.moves {
