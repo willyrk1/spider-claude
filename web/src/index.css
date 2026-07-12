@@ -200,7 +200,9 @@ button.primary { background: var(--accent); color: #23303a; border-color: var(--
   gap: 12px;
   align-items: flex-start;
   overflow-x: auto;
-  padding: 10px 4px 20px;
+  /* Top padding leaves room for the column labels (top: -18px), which the
+     overflow-x:auto (→ overflow-y:auto) box would otherwise clip. */
+  padding: 24px 4px 20px;
 }
 .column {
   position: relative;

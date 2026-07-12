@@ -158,10 +158,16 @@ export default function TrackSolve() {
 
   function applyMoves() {
     if (!resp) return;
-    let b = board;
-    for (const m of resp.moves) b = applyTrackMove(b, m);
-    setBoard(b);
+    const moves = resp.moves;
+    // Functional update so moves always apply to the latest board (never a
+    // stale closure), keeping the tracked board in step with your game.
+    setBoard((b0) => {
+      let b = b0;
+      for (const m of moves) b = applyTrackMove(b, m);
+      return b;
+    });
     setResp(null);
+    setDrafts({});
   }
 
   function dealRow() {

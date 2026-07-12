@@ -16,11 +16,11 @@
 //! only when A\* comes up empty.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
-use crate::board::{Board, Move, Undo, COLS};
+use crate::board::{Board, Move, COLS};
 use crate::card::{rank, suit};
 
 /// Default weight on the heuristic. `w = 1` is optimal but slow with a weak
@@ -171,80 +171,62 @@ impl Solver {
     /// Returns the recommended plan and what it achieves; re-run after revealing
     /// the newly-exposed cards.
     pub fn advise(board: &Board, node_limit: u64) -> Advice {
-        const DEPTH_CAP: usize = 30;
-
-        let mut b = board.clone();
         // Discovery is tableau-only: dealing reveals stock cards but is a
         // committal, user-driven action, so don't let the search deal.
-        b.stock.clear();
+        let mut start = board.clone();
+        start.stock.clear();
         let initial_fd = board.face_down_total();
+
+        // Breadth-first over tableau moves so the path to any state is the
+        // *shortest* one — the recommended plan never takes a redundant detour
+        // (e.g. A→B→C where A→C would do).
+        let mut arena: Vec<Node> = vec![Node { parent: u32::MAX, mv: Move::Deal }];
         let mut visited: HashSet<u64> = HashSet::new();
-        let mut path: Vec<Move> = Vec::new();
-        let mut undos: Vec<Undo> = Vec::new();
-        let mut stack: Vec<Frame> = Vec::new();
+        let mut queue: VecDeque<u32> = VecDeque::new();
         let mut nodes: u64 = 0;
 
-        let mut best_score = advice_score(&b, initial_fd);
-        let mut best_path: Vec<Move> = Vec::new();
+        visited.insert(start.hash());
+        queue.push_back(0);
 
-        visited.insert(b.hash());
-        stack.push(Frame { moves: generate(&b), idx: 0 });
+        let mut best_score = advice_score(&start, initial_fd);
+        let mut best_idx: u32 = 0;
 
-        'search: loop {
-            let top = match stack.last_mut() {
-                Some(f) => f,
-                None => break,
-            };
-            let mut descend = None;
-            if path.len() < DEPTH_CAP {
-                while top.idx < top.moves.len() {
-                    let m = top.moves[top.idx];
-                    top.idx += 1;
-                    nodes += 1;
-                    if nodes > node_limit {
-                        break 'search;
-                    }
-                    let undo = b.make(m);
-                    if visited.insert(b.hash()) {
-                        path.push(m);
-                        let sc = advice_score(&b, initial_fd);
-                        // Strictly better score wins; equal score prefers the
-                        // shorter plan.
-                        if sc > best_score || (sc == best_score && path.len() < best_path.len()) {
-                            best_score = sc;
-                            best_path = path.clone();
-                        }
-                        descend = Some(undo);
-                        break;
-                    }
-                    b.undo(&undo);
+        'bfs: while let Some(idx) = queue.pop_front() {
+            let mut b = board_at(&start, &arena, idx);
+            let mut moves = Vec::new();
+            b.gen_moves(&mut moves);
+            for m in moves {
+                nodes += 1;
+                if nodes > node_limit {
+                    break 'bfs;
                 }
-            }
-            match descend {
-                Some(undo) => {
-                    undos.push(undo);
-                    stack.push(Frame { moves: generate(&b), idx: 0 });
-                }
-                None => {
-                    stack.pop();
-                    if let Some(undo) = undos.pop() {
-                        b.undo(&undo);
-                        path.pop();
+                let undo = b.make(m);
+                if visited.insert(b.hash()) {
+                    let ci = arena.len() as u32;
+                    arena.push(Node { parent: idx, mv: m });
+                    let sc = advice_score(&b, initial_fd);
+                    // BFS dequeues in nondecreasing depth, so the first node to
+                    // reach a new best score is the shallowest that does.
+                    if sc > best_score {
+                        best_score = sc;
+                        best_idx = ci;
                     }
+                    queue.push_back(ci);
                 }
+                b.undo(&undo);
             }
         }
 
-        // Replay the winning plan to report what it achieves.
-        let mut end = board.clone();
-        for &m in &best_path {
+        let moves = path_to(&arena, best_idx);
+        let mut end = start.clone();
+        for &m in &moves {
             end.make(m);
         }
         Advice {
-            moves: best_path,
             uncovers: initial_fd - end.face_down_total(),
             completes: end.completed as u32,
             empties: end.empty_columns(),
+            moves,
         }
     }
 }
@@ -410,6 +392,18 @@ fn board_at(start: &Board, arena: &[Node], idx: u32) -> Board {
         board.make(m);
     }
     board
+}
+
+/// The moves from the root down to `idx`, in order.
+fn path_to(arena: &[Node], idx: u32) -> Vec<Move> {
+    let mut rev = Vec::new();
+    let mut i = idx;
+    while arena[i as usize].parent != u32::MAX {
+        rev.push(arena[i as usize].mv);
+        i = arena[i as usize].parent;
+    }
+    rev.reverse();
+    rev
 }
 
 /// Walk parent pointers to rebuild the move sequence, then append the final
