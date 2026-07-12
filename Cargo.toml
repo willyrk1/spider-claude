@@ -1,0 +1,19 @@
+[package]
+name = "spider-solver"
+version = "0.1.0"
+edition = "2021"
+description = "A fast native Spider Solitaire solver (DFS + transposition table)"
+
+[[bin]]
+name = "spider"
+path = "src/main.rs"
+
+# Release profile tuned for search throughput.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+# No dependencies on purpose: the whole thing builds offline.
+[dependencies]
