@@ -252,10 +252,10 @@ export function revealTargets(ob: OriginBoard, deal: InitialDeal): number[] {
 export const hasUnrevealed = (ob: OriginBoard, deal: InitialDeal) =>
   revealTargets(ob, deal).length > 0;
 
-/** Everything in play (and the undealt stock) is known → ready to solve. */
+/** Nothing is unknown anymore (tableau + undealt stock) → ready to solve. */
 export function fullyKnown(ob: OriginBoard, deal: InitialDeal): boolean {
-  if (ob.stockDealt < 50) return false; // can't know undealt stock
   for (const c of ob.columns) for (const o of c.cards) if (originValue(deal, o) === null) return false;
+  for (let i = ob.stockDealt; i < 50; i++) if (deal.stock[i] === null) return false;
   return true;
 }
 
@@ -284,14 +284,19 @@ export function boardDisplayState(ob: OriginBoard, deal: InitialDeal): GameState
   };
 }
 
-/** A fully-known board as a solvable GameState (for the solution player). */
+/**
+ * A fully-known board as a solvable GameState for the solution player. Keeps
+ * the real face-down counts (so they render as backs and flip up during the
+ * solution, exactly like the Solve tab) and the undealt stock in the engine's
+ * deal order (see `planStock`).
+ */
 export function boardToGameState(ob: OriginBoard, deal: InitialDeal): GameState {
   return {
     columns: ob.columns.map((c) => ({
       cards: c.cards.map((o) => originValue(deal, o)!),
-      faceDown: 0,
+      faceDown: c.faceDown,
     })),
-    stock: [],
+    stock: stockForEngine(ob, deal) as Card[],
     completed: 0,
     completedSuits: [],
   };
@@ -304,9 +309,16 @@ export function planColumns(ob: OriginBoard, deal: InitialDeal) {
     cards: c.cards.map((o) => originValue(deal, o)) as (Card | null)[],
   }));
 }
-export function planStock(ob: OriginBoard, deal: InitialDeal): (Card | null)[] {
-  return deal.stock.slice(ob.stockDealt);
+
+/**
+ * The undealt stock in the order the engine expects. The engine (and the
+ * replay) deal by popping from the *end*, so reversing the deal-order stock
+ * makes `col c` receive `stock[stockDealt + c]` — matching the real deal order.
+ */
+function stockForEngine(ob: OriginBoard, deal: InitialDeal): (Card | null)[] {
+  return deal.stock.slice(ob.stockDealt).reverse();
 }
+export const planStock = stockForEngine;
 
 // ---- Session save / load (initial deal + actions) ----
 
