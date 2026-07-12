@@ -3,7 +3,11 @@
 # be added as sibling crates without touching the core.
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/cli"]
+members = ["crates/core", "crates/cli", "crates/api"]
+
+# `cargo build` (no -p) builds only the zero-dependency core + CLI; the API,
+# which pulls in axum/tokio, is built explicitly with `-p spider-api`.
+default-members = ["crates/core", "crates/cli"]
 
 [workspace.package]
 version = "0.1.0"

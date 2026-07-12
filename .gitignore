@@ -1,2 +1,4 @@
 /target
-Cargo.lock
+
+# Cargo.lock is committed: the workspace ships binaries (CLI + API), so pinning
+# the full dependency graph keeps builds reproducible.

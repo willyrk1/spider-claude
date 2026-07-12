@@ -1,12 +1,14 @@
 # spider-solver
 
-A fast, native **Spider Solitaire** solver written in Rust with **zero dependencies**.
-Built for the "just give me an answer" use case: feed it a deal, get a solution
-(or a proof it ran out of search budget) as fast as the machine allows.
+A fast, native **Spider Solitaire** solver written in Rust. The engine and CLI
+have **zero dependencies**; an optional HTTP API adds axum/tokio. Built for the
+"just give me an answer" use case: feed it a deal, get a solution (or a proof it
+ran out of search budget) as fast as the machine allows.
 
-## Build & run
+## Build & run (CLI)
 
-Requires the Rust toolchain (see install note below).
+Requires the Rust toolchain (see install note below). `cargo build`/`cargo run`
+from the workspace root build only the zero-dependency core + CLI.
 
 ```sh
 cargo run --release -- --suits 1
@@ -32,11 +34,40 @@ A Cargo workspace so the engine can back many front ends:
 ```
 crates/
 ├── core/   spider-core — pure engine (card, board, solver, rng); no I/O, no deps
-└── cli/    spider-cli  — the `spider` binary; a thin front end over the core
+├── cli/    spider-cli  — the `spider` binary; a thin front end over the core
+└── api/    spider-api  — HTTP API (axum/tokio) exposing the solver as JSON
 ```
 
-An HTTP API or a WASM build would slot in as a sibling crate (e.g. `crates/api`)
-depending on `spider-core`, without touching the engine.
+`cargo build` (no `-p`) builds only the zero-dependency core + CLI; the API is
+built explicitly (`-p spider-api`). A WASM build could slot in the same way.
+
+## HTTP API
+
+A thin, stateless JSON wrapper over the engine.
+
+```sh
+cargo run --release -p spider-api          # serves http://127.0.0.1:3000
+```
+
+- `GET  /health` → `ok`
+- `POST /solve` → deal a game (by `suits` + `seed`) and solve it.
+
+Request body: `{ "suits": 4, "seed": 0, "nodes"?: 20000000, "weight"?: n,
+"fdw"?: n, "include_board"?: false }`. Omitting `weight`/`fdw` runs the parallel
+portfolio; setting either forces that single config.
+
+```sh
+curl -s localhost:3000/solve -H 'content-type: application/json' \
+  -d '{"suits":4,"seed":0,"include_board":true}'
+```
+
+Response: `{ solved, verified, quality, move_count, winning_config,
+nodes_searched, moves: [{type:"tableau",from,to,count} | {type:"deal"}],
+initial_board? }`. The solution is self-verified server-side by replaying it.
+
+> **Windows + GNU toolchain note:** building the API compiles `tokio`'s
+> `windows-sys`, which needs `dlltool.exe` from a full MinGW-w64 install (e.g.
+> WinLibs). The core/CLI don't need it. On the MSVC toolchain this isn't an issue.
 
 ## How it works
 

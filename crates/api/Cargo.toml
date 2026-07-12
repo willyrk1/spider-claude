@@ -1,0 +1,15 @@
+[package]
+name = "spider-api"
+version.workspace = true
+edition.workspace = true
+description = "HTTP API front end for the Spider Solitaire solver"
+
+[[bin]]
+name = "spider-api"
+path = "src/main.rs"
+
+[dependencies]
+spider-core = { path = "../core" }
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+serde = { version = "1", features = ["derive"] }
