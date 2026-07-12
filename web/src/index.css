@@ -98,6 +98,30 @@ button.primary { background: var(--accent); color: #23303a; border-color: var(--
 .move-list { margin: 8px 0 4px; padding-left: 22px; line-height: 1.7; }
 .board-title { font-size: 14px; color: var(--muted); margin: 18px 0 6px; font-weight: 600; }
 
+/* Track & solve */
+.track .hint { color: var(--muted); font-size: 13px; line-height: 1.5; max-width: 760px; }
+.reveals {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+  padding: 10px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: rgba(255, 207, 92, 0.08);
+}
+.reveal-input { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.reveal-input input {
+  width: 60px;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--panel-line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 /* Session save / load */
 .session {
   margin: 14px 0;
@@ -210,6 +234,12 @@ button.primary { background: var(--accent); color: #23303a; border-color: var(--
   background: repeating-linear-gradient(45deg, #22557a, #22557a 6px, #1c476a 6px, #1c476a 12px);
   border-color: #12314a;
 }
+.card.unknown {
+  background: #4a3d10;
+  border: 1.5px dashed var(--accent);
+  color: var(--accent);
+}
+.card.unknown .corner { font-size: 26px; top: 50%; left: 50%; transform: translate(-50%, -50%); }
 
 /* Stock pile */
 .stock-pile {

@@ -138,6 +138,100 @@ export function parseCards(text: string): { cards: Card[]; error?: string } {
   return { cards };
 }
 
+// ---- Track & solve: a live board with unknown (not-yet-revealed) cards ----
+
+// A face-up slot that's `null` is a card just revealed but not yet typed in.
+export type TrackColumn = { faceDown: number; up: (Card | null)[] };
+export type TrackBoard = { columns: TrackColumn[]; stockCount: number };
+
+/** A fresh deal: 6 cards in cols 0–3, 5 in cols 4–9, top card face-up (unknown
+ *  until you type it), the rest face-down, and 50 in the stock. */
+export function newTrackBoard(): TrackBoard {
+  return {
+    columns: Array.from({ length: COLS }, (_, i) => ({
+      faceDown: i < 4 ? 5 : 4,
+      up: [null] as (Card | null)[],
+    })),
+    stockCount: 50,
+  };
+}
+
+export const hasUnfilled = (b: TrackBoard) =>
+  b.columns.some((c) => c.up.some((x) => x === null));
+
+export const allKnown = (b: TrackBoard) =>
+  b.stockCount === 0 && b.columns.every((c) => c.faceDown === 0 && c.up.every((x) => x !== null));
+
+function completeIfPossible(col: TrackColumn) {
+  const up = col.up;
+  if (up.length < 13) return;
+  const top = up.slice(up.length - 13);
+  if (top.some((c) => c === null)) return;
+  const suit = top[0]!.suit;
+  for (let i = 0; i < 13; i++) {
+    if (top[i]!.suit !== suit || top[i]!.rank !== 13 - i) return;
+  }
+  up.length -= 13;
+  if (up.length === 0 && col.faceDown > 0) {
+    col.faceDown--;
+    up.push(null); // a newly exposed face-down card
+  }
+}
+
+/** Apply one move to the live board, exposing a `null` slot when a face-down
+ *  card gets uncovered (or when a row is dealt). */
+export function applyTrackMove(board: TrackBoard, m: Move): TrackBoard {
+  const b: TrackBoard = {
+    columns: board.columns.map((c) => ({ faceDown: c.faceDown, up: c.up.slice() })),
+    stockCount: board.stockCount,
+  };
+  if (m.type === 'deal') {
+    for (const c of b.columns) c.up.push(null);
+    b.stockCount = Math.max(0, b.stockCount - COLS);
+    for (const c of b.columns) completeIfPossible(c);
+    return b;
+  }
+  const from = b.columns[m.from];
+  const to = b.columns[m.to];
+  const moved = from.up.splice(from.up.length - m.count, m.count);
+  to.up.push(...moved);
+  if (from.up.length === 0 && from.faceDown > 0) {
+    from.faceDown--;
+    from.up.push(null);
+  }
+  completeIfPossible(to);
+  return b;
+}
+
+/** Renderable state; unknown cards (face-down or revealed-unfilled) use rank 0. */
+export function trackDisplayState(board: TrackBoard): GameState {
+  return {
+    columns: board.columns.map((c) => ({
+      cards: [
+        ...Array.from({ length: c.faceDown }, () => ({ rank: 0, suit: 0 })),
+        ...c.up.map((card) => card ?? { rank: 0, suit: 0 }),
+      ],
+      faceDown: c.faceDown,
+    })),
+    stock: [],
+    completed: 0,
+    completedSuits: [],
+  };
+}
+
+/** Convert a fully-known board into a solvable GameState (for the player). */
+export function trackToGameState(board: TrackBoard): GameState {
+  return {
+    columns: board.columns.map((c) => ({
+      cards: c.up.filter((x): x is Card => x !== null),
+      faceDown: 0,
+    })),
+    stock: [],
+    completed: 0,
+    completedSuits: [],
+  };
+}
+
 // ---- Session save / load (advisor mode) ----
 
 export type Session = { suits: number; cols: { faceDown: number; text: string }[] };

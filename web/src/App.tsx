@@ -1,9 +1,18 @@
 import { useState } from 'react';
 import SolveView from './SolveView';
 import Advisor from './Advisor';
+import TrackSolve from './TrackSolve';
+
+type Mode = 'solve' | 'advise' | 'track';
 
 export default function App() {
-  const [mode, setMode] = useState<'solve' | 'advise'>('solve');
+  const [mode, setMode] = useState<Mode>('solve');
+
+  const tab = (id: Mode, label: string) => (
+    <button className={`tab${mode === id ? ' active' : ''}`} onClick={() => setMode(id)}>
+      {label}
+    </button>
+  );
 
   return (
     <div className="app">
@@ -15,21 +24,14 @@ export default function App() {
       </header>
 
       <div className="tabs">
-        <button
-          className={`tab${mode === 'solve' ? ' active' : ''}`}
-          onClick={() => setMode('solve')}
-        >
-          Solve a deal
-        </button>
-        <button
-          className={`tab${mode === 'advise' ? ' active' : ''}`}
-          onClick={() => setMode('advise')}
-        >
-          Play along (advisor)
-        </button>
+        {tab('solve', 'Solve a deal')}
+        {tab('advise', 'Play along (advisor)')}
+        {tab('track', 'Track & solve')}
       </div>
 
-      {mode === 'solve' ? <SolveView /> : <Advisor />}
+      {mode === 'solve' && <SolveView />}
+      {mode === 'advise' && <Advisor />}
+      {mode === 'track' && <TrackSolve />}
     </div>
   );
 }

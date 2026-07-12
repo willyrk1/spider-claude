@@ -81,15 +81,17 @@ export function Board({ state, move, showStock = true }: Props) {
             {col.cards.length === 0 && <div className="empty-slot" />}
             {col.cards.map((card, i) => {
               const faceUp = i >= col.faceDown;
+              const unknown = faceUp && card.rank === 0; // revealed but not typed in
+              const color = unknown ? ' unknown' : isRed(card.suit) ? ' red' : ' black';
               return (
                 <div
                   key={i}
-                  className={`card${faceUp ? '' : ' down'}${
-                    isRed(card.suit) ? ' red' : ' black'
-                  }`}
+                  className={`card${faceUp ? '' : ' down'}${color}`}
                   style={{ top: tops[i] }}
                 >
-                  {faceUp && (
+                  {unknown ? (
+                    <span className="corner tl">?</span>
+                  ) : faceUp ? (
                     <>
                       <span className="corner tl">
                         {rankName(card.rank)}
@@ -97,7 +99,7 @@ export function Board({ state, move, showStock = true }: Props) {
                       </span>
                       <span className="pip">{suitSymbol(card.suit)}</span>
                     </>
-                  )}
+                  ) : null}
                 </div>
               );
             })}
