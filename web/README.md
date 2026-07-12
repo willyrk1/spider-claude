@@ -1,8 +1,13 @@
 # spider-web
 
-A React + TypeScript front end for the Spider Solitaire solver. It calls the
-`spider-api` server, renders the dealt board, and plays the solver's solution
-move by move.
+A React + TypeScript front end for the Spider Solitaire solver. Two modes:
+
+- **Solve a deal** — deal a game by suits + seed, then play the solver's full
+  solution move by move.
+- **Play along (advisor)** — for a game you're playing elsewhere where you can
+  only see the face-up cards. Enter each column's face-down count and face-up
+  cards; the server recommends moves that best uncover face-down cards. Reveal
+  the exposed cards, update the board, and ask again. (Uses `POST /advise`.)
 
 ## Run
 

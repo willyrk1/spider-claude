@@ -36,3 +36,33 @@ export async function solve(params: SolveParams): Promise<SolveResponse> {
   }
   return res.json();
 }
+
+export type AdviseColumn = {
+  face_down: number;
+  up: { rank: number; suit: number }[];
+};
+
+export type AdviseResponse = {
+  moves: Move[];
+  uncovers: number;
+  completes: number;
+  empties: number;
+  note: string;
+};
+
+/** POST /advise — partial-information advice for a game you can only partly see. */
+export async function advise(params: {
+  suits: number;
+  columns: AdviseColumn[];
+}): Promise<AdviseResponse> {
+  const res = await fetch('/api/advise', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`API ${res.status}${text ? `: ${text}` : ''}`);
+  }
+  return res.json();
+}

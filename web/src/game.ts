@@ -120,3 +120,39 @@ export function describeMove(m: Move): string {
   const noun = m.count === 1 ? 'card' : 'cards';
   return `Move ${m.count} ${noun}: column ${m.from} → column ${m.to}`;
 }
+
+const SUIT_LETTERS: Record<string, number> = { s: 0, h: 1, c: 2, d: 3 };
+
+/** Parse card shorthand like "Ks Qh 10c" into cards. Suits: s h c d. */
+export function parseCards(text: string): { cards: Card[]; error?: string } {
+  const tokens = text.trim().split(/\s+/).filter(Boolean);
+  const cards: Card[] = [];
+  for (const tok of tokens) {
+    const m = tok.match(/^(10|[2-9]|[atjqkATJQK])([shcdSHCD])$/);
+    if (!m) return { cards: [], error: `bad card "${tok}"` };
+    const r = m[1].toLowerCase();
+    const rank =
+      r === 'a' ? 1 : r === 't' || r === '10' ? 10 : r === 'j' ? 11 : r === 'q' ? 12 : r === 'k' ? 13 : Number(r);
+    cards.push({ rank, suit: SUIT_LETTERS[m[2].toLowerCase()] });
+  }
+  return { cards };
+}
+
+/**
+ * Build a renderable state from what a player typed: face-down cards become
+ * placeholder backs (their identity is unknown), followed by the face-up cards.
+ */
+export function displayState(columns: { faceDown: number; up: Card[] }[]): GameState {
+  return {
+    columns: columns.map((c) => ({
+      cards: [
+        ...Array.from({ length: c.faceDown }, () => ({ rank: 0, suit: 0 })),
+        ...c.up,
+      ],
+      faceDown: c.faceDown,
+    })),
+    stock: [],
+    completed: 0,
+    completedSuits: [],
+  };
+}

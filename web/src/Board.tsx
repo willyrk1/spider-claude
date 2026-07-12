@@ -4,7 +4,7 @@ import { COLS, isRed, rankName, suitSymbol } from './game';
 const FACE_DOWN_STEP = 15; // vertical px each covered face-down card contributes
 const FACE_UP_STEP = 30; //   ...and each covered face-up card
 
-type Props = { state: GameState; move: Move | null };
+type Props = { state: GameState; move: Move | null; showStock?: boolean };
 
 /** Which columns the current move touches, for a subtle highlight. */
 function activeCols(move: Move | null): Set<number> {
@@ -54,7 +54,7 @@ export function Foundations({
   );
 }
 
-export function Board({ state, move }: Props) {
+export function Board({ state, move, showStock = true }: Props) {
   const active = activeCols(move);
   const dealing = move?.type === 'deal';
 
@@ -104,11 +104,13 @@ export function Board({ state, move }: Props) {
           </div>
         );
       })}
-      <div className={`stock-pile${dealing ? ' active' : ''}`}>
-        <div className="col-label">stock</div>
-        <div className="stock-count">{state.stock.length}</div>
-        <div className="stock-sub">{state.stock.length / COLS} deals left</div>
-      </div>
+      {showStock && (
+        <div className={`stock-pile${dealing ? ' active' : ''}`}>
+          <div className="col-label">stock</div>
+          <div className="stock-count">{state.stock.length}</div>
+          <div className="stock-sub">{state.stock.length / COLS} deals left</div>
+        </div>
+      )}
     </div>
   );
 }
