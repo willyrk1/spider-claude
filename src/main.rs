@@ -23,8 +23,10 @@ fn main() {
     let suits: u8 = arg(&args, "--suits").unwrap_or(1);
     let seed: u64 = arg(&args, "--seed").unwrap_or(42);
     let node_limit: u64 = arg(&args, "--nodes").unwrap_or(20_000_000);
-    let weight: u32 = arg(&args, "--weight").unwrap_or(solver::DEFAULT_WEIGHT);
-    let fd_weight: u32 = arg(&args, "--fdw").unwrap_or(solver::DEFAULT_FD_WEIGHT);
+    // Explicit --weight/--fdw forces a single configuration; otherwise the
+    // default is the parallel portfolio.
+    let explicit_weight: Option<u32> = arg(&args, "--weight");
+    let explicit_fdw: Option<u32> = arg(&args, "--fdw");
     let quiet = args.iter().any(|a| a == "--quiet");
 
     if !matches!(suits, 1 | 2 | 4) {
@@ -41,25 +43,39 @@ fn main() {
         println!("\nInitial deal:\n{}", board.render());
     }
 
-    // Iterative search uses an explicit stack, so it runs fine on the normal
-    // main-thread stack — no deep recursion, no overflow.
     let start = Instant::now();
-    let result = Solver::solve(&board, node_limit, weight, fd_weight);
+    let result = if explicit_weight.is_some() || explicit_fdw.is_some() {
+        let w = explicit_weight.unwrap_or(solver::DEFAULT_WEIGHT);
+        let fdw = explicit_fdw.unwrap_or(solver::DEFAULT_FD_WEIGHT);
+        println!("search: single config (weight {}, fdw {})", w, fdw);
+        Solver::solve(&board, node_limit, w, fdw)
+    } else {
+        println!(
+            "search: portfolio of {} configs across threads",
+            solver::DEFAULT_PORTFOLIO.len()
+        );
+        Solver::solve_portfolio(&board, node_limit, solver::DEFAULT_PORTFOLIO)
+    };
     let elapsed = start.elapsed();
 
     match result.moves {
         Some(moves) => {
             let quality = if result.from_fallback {
-                "DFS fallback — long path; A* found nothing in budget"
+                "DFS fallback — long path; A* found nothing in budget".to_string()
             } else if result.converged {
-                "shortest found (search converged)"
+                "shortest found (search converged)".to_string()
             } else {
-                "shortest found so far — raise --nodes to shorten further"
+                "shortest found so far — raise --nodes to shorten further".to_string()
+            };
+            let via = match result.winning_config {
+                Some((w, fdw)) => format!(" via weight {}, fdw {}", w, fdw),
+                None => String::new(),
             };
             println!(
-                "SOLVED in {} moves [{}] — searched {} nodes in {:.2?}",
+                "SOLVED in {} moves [{}]{} — searched {} nodes in {:.2?}",
                 moves.len(),
                 quality,
+                via,
                 result.nodes,
                 elapsed
             );

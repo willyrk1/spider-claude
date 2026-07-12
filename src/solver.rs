@@ -17,6 +17,8 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 
 use crate::board::{Board, Move, COLS};
 use crate::card::{rank, suit};
@@ -30,6 +32,12 @@ pub const DEFAULT_WEIGHT: u32 = 2;
 /// search favor states that have turned up more buried cards.
 pub const DEFAULT_FD_WEIGHT: u32 = 4;
 
+/// Default portfolio of `(weight, fd_weight)` configurations run in parallel.
+/// Chosen for diversity — the sweep showed different settings crack largely
+/// different 4-suit deals, so their union solves far more than any single one.
+pub const DEFAULT_PORTFOLIO: &[(u32, u32)] =
+    &[(2, 4), (3, 4), (3, 2), (3, 8), (3, 12), (2, 2)];
+
 pub struct SolveResult {
     pub moves: Option<Vec<Move>>,
     pub nodes: u64,
@@ -40,6 +48,9 @@ pub struct SolveResult {
     /// True when the answer came from the DFS fallback (A* found nothing), so
     /// the solution is valid but not short.
     pub from_fallback: bool,
+    /// The `(weight, fd_weight)` config that produced the answer, when the
+    /// portfolio was used.
+    pub winning_config: Option<(u32, u32)>,
 }
 
 struct Frame {
@@ -50,13 +61,18 @@ struct Frame {
 pub struct Solver;
 
 impl Solver {
+    /// Single-configuration search: weighted-A* primary, DFS fallback.
     pub fn solve(board: &Board, node_limit: u64, weight: u32, fd_weight: u32) -> SolveResult {
+        let never = AtomicBool::new(false);
         let mut nodes: u64 = 0;
 
         // Primary: weighted-A* for a short solution (and best shot at hard deals).
-        let (astar, converged) = astar_short(board, node_limit, &mut nodes, weight, fd_weight);
+        let (astar, converged) = astar_short(board, node_limit, &mut nodes, weight, fd_weight, &never);
         if let Some(p) = astar {
-            return SolveResult { moves: Some(p), nodes, hit_limit: false, converged, from_fallback: false };
+            return SolveResult {
+                moves: Some(p), nodes, hit_limit: false, converged,
+                from_fallback: false, winning_config: None,
+            };
         }
 
         // Fallback: plain DFS for *any* solution, with its own fresh budget.
@@ -64,8 +80,76 @@ impl Solver {
         let fallback = dfs_first(board, node_limit, &mut dfs_nodes);
         nodes += dfs_nodes;
         match fallback {
-            Some(p) => SolveResult { moves: Some(p), nodes, hit_limit: false, converged: false, from_fallback: true },
-            None => SolveResult { moves: None, nodes, hit_limit: true, converged: false, from_fallback: false },
+            Some(p) => SolveResult {
+                moves: Some(p), nodes, hit_limit: false, converged: false,
+                from_fallback: true, winning_config: None,
+            },
+            None => SolveResult {
+                moves: None, nodes, hit_limit: true, converged: false,
+                from_fallback: false, winning_config: None,
+            },
+        }
+    }
+
+    /// Run several `(weight, fd_weight)` A* searches in parallel (one thread
+    /// each) and take the first solution any of them finds; a shared stop flag
+    /// halts the rest. Different configs crack largely different hard deals, so
+    /// the portfolio's coverage far exceeds any single configuration's. Falls
+    /// back to a single-threaded DFS only if every config comes up empty.
+    pub fn solve_portfolio(board: &Board, node_limit: u64, configs: &[(u32, u32)]) -> SolveResult {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+
+        let mut handles = Vec::with_capacity(configs.len());
+        for &(w, fdw) in configs {
+            let board = board.clone();
+            let stop = Arc::clone(&stop);
+            let tx = tx.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut nodes: u64 = 0;
+                let (res, converged) = astar_short(&board, node_limit, &mut nodes, w, fdw, &stop);
+                // Ignore send errors: the receiver may already have a winner.
+                let _ = tx.send(((w, fdw), res, converged, nodes));
+            }));
+        }
+        drop(tx); // so `rx` ends once every worker has reported
+
+        // Drain every worker's report: remember the first solution, tally nodes.
+        let mut winner: Option<((u32, u32), Vec<Move>, bool)> = None;
+        let mut total_nodes: u64 = 0;
+        for (config, res, converged, nodes) in rx {
+            total_nodes += nodes;
+            if winner.is_none() {
+                if let Some(p) = res {
+                    stop.store(true, Ordering::Relaxed); // tell the others to quit
+                    winner = Some((config, p, converged));
+                }
+            }
+        }
+        for h in handles {
+            let _ = h.join();
+        }
+
+        if let Some((config, p, converged)) = winner {
+            return SolveResult {
+                moves: Some(p), nodes: total_nodes, hit_limit: false, converged,
+                from_fallback: false, winning_config: Some(config),
+            };
+        }
+
+        // No config solved it: last-resort DFS for *any* solution.
+        let mut dfs_nodes: u64 = 0;
+        let fallback = dfs_first(board, node_limit, &mut dfs_nodes);
+        total_nodes += dfs_nodes;
+        match fallback {
+            Some(p) => SolveResult {
+                moves: Some(p), nodes: total_nodes, hit_limit: false, converged: false,
+                from_fallback: true, winning_config: None,
+            },
+            None => SolveResult {
+                moves: None, nodes: total_nodes, hit_limit: true, converged: false,
+                from_fallback: false, winning_config: None,
+            },
         }
     }
 }
@@ -177,6 +261,7 @@ fn astar_short(
     nodes: &mut u64,
     w: u32,
     fdw: u32,
+    stop: &AtomicBool,
 ) -> (Option<Vec<Move>>, bool) {
     let mut arena: Vec<Node> = vec![Node { parent: u32::MAX, mv: Move::Deal }];
     let mut closed: HashSet<u64> = HashSet::new();
@@ -187,6 +272,10 @@ fn astar_short(
     open.push((Reverse(w * heuristic(start, fdw)), 0, 0));
 
     while let Some((_pri, g, idx)) = open.pop() {
+        // Another portfolio worker already won — abandon this search.
+        if stop.load(Ordering::Relaxed) {
+            return (None, false);
+        }
         // Rebuild this node's board once, then expand with make/undo.
         let mut board = board_at(start, &arena, idx);
         let mut moves = Vec::new();
