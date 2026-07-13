@@ -413,7 +413,7 @@ async fn plan(Json(req): Json<PlanRequest>) -> Result<Json<PlanResponse>, (Statu
         let (phase, note) = if advice.moves.is_empty() {
             (
                 "stuck",
-                "Nothing new can be revealed: no move reaches an unknown card, and there's no stock left to deal. Use ↶ Undo to back up and try a different line.".to_string(),
+                "Nothing new can be revealed — no move reaches an unknown card, and dealing wouldn't turn one up either. Use ↶ Undo to back up and try a different line.".to_string(),
             )
         } else if is_deal {
             (

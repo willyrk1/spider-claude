@@ -263,6 +263,49 @@ export function fullyKnown(ob: OriginBoard, deal: InitialDeal): boolean {
   return true;
 }
 
+/**
+ * If exactly one card in the whole deck is still unknown, deduce it — it's the
+ * one card missing from everything else you've entered. (You never need to
+ * uncover the very last card.) Returns null unless exactly one is unknown.
+ */
+export function deduceLastUnknown(deal: InitialDeal, suits: number): Card | null {
+  const copies = 8 / suits; // 4-suit → 2, 2-suit → 4, 1-suit → 8
+  const remaining = new Map<string, number>();
+  for (let s = 0; s < suits; s++) for (let r = 1; r <= 13; r++) remaining.set(`${r},${s}`, copies);
+
+  let unknowns = 0;
+  const account = (c: Card | null) => {
+    if (c === null) unknowns++;
+    else remaining.set(`${c.rank},${c.suit}`, (remaining.get(`${c.rank},${c.suit}`) ?? 0) - 1);
+  };
+  for (const col of deal.tableau) for (const c of col) account(c);
+  for (const c of deal.stock) account(c);
+
+  if (unknowns !== 1) return null;
+  for (const [key, n] of remaining) {
+    if (n > 0) {
+      const [rank, suit] = key.split(',').map(Number);
+      return { rank, suit };
+    }
+  }
+  return null;
+}
+
+/** Fill the single unknown slot in the deal with `card`. */
+export function fillOnlyUnknown(deal: InitialDeal, card: Card): InitialDeal {
+  const nd: InitialDeal = { tableau: deal.tableau.map((t) => t.slice()), stock: deal.stock.slice() };
+  for (const col of nd.tableau) {
+    const i = col.indexOf(null);
+    if (i >= 0) {
+      col[i] = card;
+      return nd;
+    }
+  }
+  const j = nd.stock.indexOf(null);
+  if (j >= 0) nd.stock[j] = card;
+  return nd;
+}
+
 /** Record the card just revealed at column `col`'s top into the initial deal. */
 export function revealAt(deal: InitialDeal, ob: OriginBoard, col: number, card: Card): InitialDeal {
   const c = ob.columns[col];

@@ -4,9 +4,12 @@ import { plan, type PlanResponse } from './api';
 import {
   boardDisplayState,
   boardToGameState,
+  cardToShort,
   computeStates,
+  deduceLastUnknown,
   deriveBoard,
   describeMove,
+  fillOnlyUnknown,
   fullyKnown,
   hasUnrevealed,
   newInitialDeal,
@@ -61,6 +64,7 @@ export default function TrackSolve() {
   const [drafts, setDrafts] = useState<Record<number, string>>({});
   const [sessionText, setSessionText] = useState('');
   const [copied, setCopied] = useState(false);
+  const [deduced, setDeduced] = useState<string | null>(null);
 
   // Solve-phase player.
   const [states, setStates] = useState<GameState[] | null>(null);
@@ -74,6 +78,16 @@ export default function TrackSolve() {
       /* ignore */
     }
   }, [suits, deal, actions]);
+
+  // When only one card is left unknown, deduce it — you never need to uncover
+  // the last card (it's whatever is missing from everything else you entered).
+  useEffect(() => {
+    const card = deduceLastUnknown(deal, suits);
+    if (card) {
+      setDeal((d) => fillOnlyUnknown(d, card));
+      setDeduced(cardToShort(card));
+    }
+  }, [deal, suits]);
 
   useEffect(() => {
     if (!playing || !states) return;
@@ -97,6 +111,7 @@ export default function TrackSolve() {
     setError(null);
     setStates(null);
     setDrafts({});
+    setDeduced(null);
   }
 
   /** Undo the last *action* (move or deal). Revealed cards stay known. */
@@ -136,6 +151,7 @@ export default function TrackSolve() {
     setStates(null);
     setError(null);
     setDrafts({});
+    setDeduced(null);
   }
 
   /** Record a revealed card into the initial deal. */
@@ -257,6 +273,14 @@ export default function TrackSolve() {
       </details>
 
       {error && <div className="banner error">⚠ {error}</div>}
+
+      {deduced && (
+        <div className="banner good">
+          Only one card was unknown, so it's deduced: <b>{deduced}</b> (the one
+          card missing from everything else). The deck is now fully known — hit{' '}
+          <b>Solve!</b>.
+        </div>
+      )}
 
       {revealCols.length > 0 && (
         <div className="reveals">
