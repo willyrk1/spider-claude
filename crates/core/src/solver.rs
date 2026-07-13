@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
 use crate::board::{Board, Move, COLS};
-use crate::card::{is_unknown, rank, suit};
+use crate::card::{rank, suit};
 
 /// Default weight on the heuristic. `w = 1` is optimal but slow with a weak
 /// heuristic; larger `w` trades a little length for a lot of speed (weighted A*)
@@ -167,89 +167,97 @@ impl Solver {
 
     /// Partial-information advisor. Searches for a short sequence that reveals
     /// *unknown* cards — exposing a card you already know teaches you nothing, so
-    /// only newly-learned (unknown) cards count. If no tableau move can reach an
-    /// unknown, it recommends dealing a row (which reveals unknown stock cards).
-    /// Re-run after revealing the newly-exposed cards.
+    /// only newly-learned (unknown) cards count.
+    ///
+    /// It first looks for a tableau-only plan (dealing is committal, so it's
+    /// avoided when unnecessary). If none reveals anything, it searches again
+    /// *allowing one deal* — so when a deal is a necessary step toward uncovering
+    /// a card, that deal is built into the recommended plan rather than left for
+    /// the user to figure out. Re-run after revealing the newly-exposed cards.
     pub fn advise(board: &Board, node_limit: u64) -> Advice {
-        let start_completed = board.completed;
-        // The tableau search never deals (a deal is a committal, user-driven
-        // action); clearing the stock keeps `gen_moves` from offering one.
-        let mut start = board.clone();
-        start.stock.clear();
-
-        // Reward: unknown cards now face-up, plus completed runs (which remove
-        // cards and can uncover more). Breadth-first, so the path to the best
-        // state is the shortest — no redundant detours.
-        let reward = |b: &Board| -> i64 {
-            b.exposed_unknowns() as i64 + (b.completed - start_completed) as i64 * 20
-        };
-
-        let mut arena: Vec<Node> = vec![Node { parent: u32::MAX, mv: Move::Deal }];
-        let mut visited: HashSet<u64> = HashSet::new();
-        let mut queue: VecDeque<u32> = VecDeque::new();
-        let mut nodes: u64 = 0;
-
-        visited.insert(start.hash());
-        queue.push_back(0);
-
-        let mut best_reward = reward(&start); // 0 — nothing exposed yet
-        let mut best_idx: u32 = 0;
-
-        'bfs: while let Some(idx) = queue.pop_front() {
-            let mut b = board_at(&start, &arena, idx);
-            let mut moves = Vec::new();
-            b.gen_moves(&mut moves);
-            for m in moves {
-                nodes += 1;
-                if nodes > node_limit {
-                    break 'bfs;
-                }
-                let undo = b.make(m);
-                if visited.insert(b.hash()) {
-                    let ci = arena.len() as u32;
-                    arena.push(Node { parent: idx, mv: m });
-                    let r = reward(&b);
-                    if r > best_reward {
-                        best_reward = r;
-                        best_idx = ci;
-                    }
-                    queue.push_back(ci);
-                }
-                b.undo(&undo);
-            }
+        // Phase 1: tableau only (no deal). Clearing the stock stops `gen_moves`
+        // from offering a deal.
+        let mut tableau = board.clone();
+        tableau.stock.clear();
+        if let Some(advice) = search_reveals(&tableau, node_limit, 0) {
+            return advice;
         }
 
-        // A tableau plan that reveals something wins.
-        if best_reward > 0 {
-            let moves = path_to(&arena, best_idx);
-            let mut end = start.clone();
-            for &m in &moves {
-                end.make(m);
-            }
-            return Advice {
-                uncovers: end.exposed_unknowns(),
-                completes: (end.completed - start_completed) as u32,
-                empties: end.empty_columns(),
-                moves,
-            };
-        }
-
-        // Nothing new is reachable on the tableau. Recommend dealing a row if it
-        // would reveal unknown stock cards (and dealing is legal).
-        let can_deal = !board.stock.is_empty()
-            && (board.allow_deal_with_empty || board.cols.iter().all(|c| !c.is_empty()));
-        if can_deal && board.stock.iter().any(|&c| is_unknown(c)) {
-            let next_row = board.stock.iter().take(COLS).filter(|&&c| is_unknown(c)).count() as u32;
-            return Advice {
-                uncovers: next_row,
-                completes: 0,
-                empties: board.empty_columns(),
-                moves: vec![Move::Deal],
-            };
+        // Phase 2: allow a single deal, so a deal that leads to an uncovering is
+        // included as a step (with any moves before/after it).
+        if let Some(advice) = search_reveals(board, node_limit, 1) {
+            return advice;
         }
 
         Advice { uncovers: 0, completes: 0, empties: board.empty_columns(), moves: Vec::new() }
     }
+}
+
+/// Breadth-first search for the shortest plan that reveals unknown cards (or
+/// completes runs), allowing at most `max_deals` deals. Returns `None` if no
+/// reachable plan reveals anything. Because BFS visits states in nondecreasing
+/// depth, the recovered plan is a shortest one — no redundant detours.
+fn search_reveals(start_board: &Board, node_limit: u64, max_deals: usize) -> Option<Advice> {
+    let start = start_board.clone();
+    let start_completed = start.completed;
+    let start_stock = start.stock.len();
+    let reward =
+        |b: &Board| -> i64 { b.exposed_unknowns() as i64 + (b.completed - start_completed) as i64 * 20 };
+
+    let mut arena: Vec<Node> = vec![Node { parent: u32::MAX, mv: Move::Deal }];
+    let mut visited: HashSet<u64> = HashSet::new();
+    let mut queue: VecDeque<u32> = VecDeque::new();
+    let mut nodes: u64 = 0;
+
+    visited.insert(start.hash());
+    queue.push_back(0);
+
+    let mut best_reward = reward(&start); // 0 — nothing revealed yet
+    let mut best_idx: u32 = 0;
+
+    'bfs: while let Some(idx) = queue.pop_front() {
+        let mut b = board_at(&start, &arena, idx);
+        // Each deal removes COLS cards from the stock; cap the number allowed.
+        let deals_so_far = (start_stock - b.stock.len()) / COLS;
+        let mut moves = Vec::new();
+        b.gen_moves(&mut moves);
+        for m in moves {
+            if matches!(m, Move::Deal) && deals_so_far >= max_deals {
+                continue;
+            }
+            nodes += 1;
+            if nodes > node_limit {
+                break 'bfs;
+            }
+            let undo = b.make(m);
+            if visited.insert(b.hash()) {
+                let ci = arena.len() as u32;
+                arena.push(Node { parent: idx, mv: m });
+                let r = reward(&b);
+                if r > best_reward {
+                    best_reward = r;
+                    best_idx = ci;
+                }
+                queue.push_back(ci);
+            }
+            b.undo(&undo);
+        }
+    }
+
+    if best_reward <= 0 {
+        return None;
+    }
+    let moves = path_to(&arena, best_idx);
+    let mut end = start.clone();
+    for &m in &moves {
+        end.make(m);
+    }
+    Some(Advice {
+        uncovers: end.exposed_unknowns(),
+        completes: (end.completed - start_completed) as u32,
+        empties: end.empty_columns(),
+        moves,
+    })
 }
 
 /// Estimated moves remaining (0 exactly at a win). Not admissible — it's tuned

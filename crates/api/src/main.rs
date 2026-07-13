@@ -409,16 +409,25 @@ async fn plan(Json(req): Json<PlanRequest>) -> Result<Json<PlanResponse>, (Statu
         let advice: Advice = tokio::task::spawn_blocking(move || Solver::advise(&b, req.advise_nodes))
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let is_deal = advice.moves.len() == 1 && matches!(advice.moves[0], Move::Deal);
+        let has_deal = advice.moves.iter().any(|m| matches!(m, Move::Deal));
         let (phase, note) = if advice.moves.is_empty() {
             (
                 "stuck",
                 "Nothing new can be revealed — no move reaches an unknown card, and dealing wouldn't turn one up either. Use ↶ Undo to back up and try a different line.".to_string(),
             )
-        } else if is_deal {
+        } else if advice.moves.len() == 1 && has_deal {
             (
                 "discover",
-                "No move uncovers an unknown card — deal a row from the stock (to reach the unknown stock cards), then fill in any newly dealt cards.".to_string(),
+                "No move uncovers an unknown card — deal a row from the stock, then fill in any newly dealt cards.".to_string(),
+            )
+        } else if has_deal {
+            (
+                "discover",
+                format!(
+                    "Play {} step(s) — including a deal — to reveal {} unknown card(s), then fill them in.",
+                    advice.moves.len(),
+                    advice.uncovers
+                ),
             )
         } else {
             (
