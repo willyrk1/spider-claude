@@ -115,6 +115,10 @@ export const rankName = (rank: number) => RANK_NAMES[rank] ?? '?';
 export const suitSymbol = (suit: number) => SUIT_SYMBOLS[suit] ?? '?';
 export const isRed = (suit: number) => suit === 1 || suit === 3;
 
+// Four-colour deck: spades black, hearts red, clubs green, diamonds blue.
+export const suitClass = (suit: number): string =>
+  ['black', 'red', 'green', 'blue'][suit] ?? 'black';
+
 export function describeMove(m: Move): string {
   if (m.type === 'deal') return 'Deal a row from the stock';
   const noun = m.count === 1 ? 'card' : 'cards';

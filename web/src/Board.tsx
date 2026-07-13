@@ -1,5 +1,5 @@
 import type { GameState, Move } from './game';
-import { COLS, isRed, rankName, suitSymbol } from './game';
+import { COLS, rankName, suitClass, suitSymbol } from './game';
 
 const FACE_DOWN_STEP = 15; // vertical px each covered face-down card contributes
 const FACE_UP_STEP = 30; //   ...and each covered face-up card
@@ -36,7 +36,7 @@ export function Foundations({
         const suit = suits[i];
         const filled = suit !== undefined;
         const isNewest = filled && i === suits.length - 1 && justCompleted;
-        const cls = filled ? (isRed(suit) ? 'red' : 'black') : 'empty';
+        const cls = filled ? suitClass(suit) : 'empty';
         return (
           <div key={i} className={`foundation ${cls}${isNewest ? ' pop' : ''}`}>
             {filled && (
@@ -82,7 +82,7 @@ export function Board({ state, move, showStock = true }: Props) {
             {col.cards.map((card, i) => {
               const faceUp = i >= col.faceDown;
               const unknown = faceUp && card.rank === 0; // revealed but not typed in
-              const color = unknown ? ' unknown' : isRed(card.suit) ? ' red' : ' black';
+              const color = unknown ? ' unknown' : ' ' + suitClass(card.suit);
               return (
                 <div
                   key={i}
