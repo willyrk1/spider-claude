@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
 use crate::board::{Board, Move, COLS};
-use crate::card::{rank, suit};
+use crate::card::{is_unknown, rank, suit};
 
 /// Default weight on the heuristic. `w = 1` is optimal but slow with a weak
 /// heuristic; larger `w` trades a little length for a lot of speed (weighted A*)
@@ -171,21 +171,24 @@ impl Solver {
     ///
     /// It first looks for a tableau-only plan (dealing is committal, so it's
     /// avoided when unnecessary). If none reveals anything, it searches again
-    /// *allowing one deal* — so when a deal is a necessary step toward uncovering
-    /// a card, that deal is built into the recommended plan rather than left for
-    /// the user to figure out. Re-run after revealing the newly-exposed cards.
+    /// *allowing deals* — so a deal (or several) needed on the way to uncovering
+    /// a card is built into the recommended plan rather than left for the user to
+    /// figure out. A deal whose row is fully known is a look-ahead step the plan
+    /// can continue past; a deal that would turn up unknown cards *is itself* the
+    /// reveal, so the plan stops there (you can't plan past cards you can't see).
+    /// Re-run after revealing the newly-exposed cards.
     pub fn advise(board: &Board, node_limit: u64) -> Advice {
         // Phase 1: tableau only (no deal). Clearing the stock stops `gen_moves`
         // from offering a deal.
         let mut tableau = board.clone();
         tableau.stock.clear();
-        if let Some(advice) = search_reveals(&tableau, node_limit, 0) {
+        if let Some(advice) = search_reveals(&tableau, node_limit, false) {
             return advice;
         }
 
-        // Phase 2: allow a single deal, so a deal that leads to an uncovering is
-        // included as a step (with any moves before/after it).
-        if let Some(advice) = search_reveals(board, node_limit, 1) {
+        // Phase 2: allow deals, chaining as many known-row deals as it takes to
+        // reach an uncovering (each with any moves before/after it).
+        if let Some(advice) = search_reveals(board, node_limit, true) {
             return advice;
         }
 
@@ -194,15 +197,26 @@ impl Solver {
 }
 
 /// Breadth-first search for the shortest plan that reveals unknown cards (or
-/// completes runs), allowing at most `max_deals` deals. Returns `None` if no
-/// reachable plan reveals anything. Because BFS visits states in nondecreasing
-/// depth, the recovered plan is a shortest one — no redundant detours.
-fn search_reveals(start_board: &Board, node_limit: u64, max_deals: usize) -> Option<Advice> {
+/// completes runs). When `allow_deals` is set, a deal may be used as a plan step;
+/// a deal whose row is fully known is a look-ahead the search plans past, while a
+/// deal that would turn up unknown cards is a *terminal* reveal (recorded but not
+/// expanded — you can't plan moves over cards you haven't seen). Returns `None`
+/// if no reachable plan reveals anything. Because BFS visits states in
+/// nondecreasing depth, the recovered plan is a shortest one — no redundant
+/// detours.
+fn search_reveals(start_board: &Board, node_limit: u64, allow_deals: bool) -> Option<Advice> {
     let start = start_board.clone();
     let start_completed = start.completed;
-    let start_stock = start.stock.len();
     let reward =
         |b: &Board| -> i64 { b.exposed_unknowns() as i64 + (b.completed - start_completed) as i64 * 20 };
+
+    // Whether the next row `b` would deal (the top `COLS` of the stock, which a
+    // deal pops from the end) is fully known — such a deal reveals nothing itself,
+    // so the search may continue planning past it.
+    let next_row_known = |b: &Board| -> bool {
+        let n = b.stock.len();
+        n >= COLS && b.stock[n - COLS..].iter().all(|&c| !is_unknown(c))
+    };
 
     let mut arena: Vec<Node> = vec![Node { parent: u32::MAX, mv: Move::Deal }];
     let mut visited: HashSet<u64> = HashSet::new();
@@ -217,12 +231,13 @@ fn search_reveals(start_board: &Board, node_limit: u64, max_deals: usize) -> Opt
 
     'bfs: while let Some(idx) = queue.pop_front() {
         let mut b = board_at(&start, &arena, idx);
-        // Each deal removes COLS cards from the stock; cap the number allowed.
-        let deals_so_far = (start_stock - b.stock.len()) / COLS;
+        // A deal that turns up unknown cards is itself the reveal, so we stop
+        // planning past it; a fully-known-row deal is a look-ahead step.
+        let terminal_deal = !next_row_known(&b);
         let mut moves = Vec::new();
         b.gen_moves(&mut moves);
         for m in moves {
-            if matches!(m, Move::Deal) && deals_so_far >= max_deals {
+            if matches!(m, Move::Deal) && !allow_deals {
                 continue;
             }
             nodes += 1;
@@ -238,7 +253,10 @@ fn search_reveals(start_board: &Board, node_limit: u64, max_deals: usize) -> Opt
                     best_reward = r;
                     best_idx = ci;
                 }
-                queue.push_back(ci);
+                // Don't expand past a deal that revealed unknown cards.
+                if !(matches!(m, Move::Deal) && terminal_deal) {
+                    queue.push_back(ci);
+                }
             }
             b.undo(&undo);
         }
@@ -482,5 +500,99 @@ fn move_key(b: &Board, m: &Move) -> u8 {
             }
             3
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::card::{make_card, Card, UNKNOWN};
+
+    fn parse_card(tok: &str) -> Card {
+        if tok == "?" {
+            return UNKNOWN;
+        }
+        let (rank_str, suit_ch) = tok.split_at(tok.len() - 1);
+        let rank = match rank_str {
+            "A" => 1,
+            "J" => 11,
+            "Q" => 12,
+            "K" => 13,
+            n => n.parse().expect("rank"),
+        };
+        let suit = match suit_ch {
+            "s" => 0,
+            "h" => 1,
+            "c" => 2,
+            "d" => 3,
+            _ => panic!("suit"),
+        };
+        make_card(rank, suit)
+    }
+
+    fn cards(s: &str) -> Vec<Card> {
+        s.split_whitespace().map(parse_card).collect()
+    }
+
+    /// A real reported position: fully-known stock, tableau frozen. The only
+    /// columns whose next hidden card is unknown are under immovable Kings, so no
+    /// tableau move (or single deal) reaches an unknown — a reveal needs a couple
+    /// of deals plus setup moves.
+    fn frozen_known_stock_board() -> Board {
+        let cols: Vec<(u8, Vec<Card>)> = vec![
+            (5, cards("5c 6c Jd 8h Qs 10c")),
+            (5, cards("? ? ? ? 6d 9h")),
+            (5, cards("? ? Jd Ac 8c 3c")),
+            (5, cards("? ? ? ? 2c Ac")),
+            (4, cards("? ? ? ? Ks")),
+            (4, cards("? ? ? ? Kc")),
+            (4, cards("? ? ? 10h 3h")),
+            (4, cards("9d Js Ah 9c 3d")),
+            (4, cards("? ? 8s 2h 3d")),
+            (4, cards("? ? 10s 4d 6h")),
+        ];
+        // Stock in engine order: a deal pops from the end, so reverse deal order.
+        let mut stock = cards(
+            "8c 5s 7s 5c 7h 4s 7s 5d Qd Kd 5h 2s 6h 9s As 4h 10d Qs Kh 6d 7d 2c 4d Ah Jc \
+             As 4s Qh 2d 2s 3c 5d 5s 7c 2h 10h 6s 10s Ad 9s Qd 7h Kc Jh 9h 8d 8d 8s Ks 5h",
+        );
+        stock.reverse();
+        Board::from_parts(&cols, &stock).expect("valid board")
+    }
+
+    #[test]
+    fn advise_builds_necessary_deals_into_a_reveal_plan() {
+        let board = frozen_known_stock_board();
+        assert_eq!(board.exposed_unknowns(), 0, "no unknown starts face-up");
+
+        let advice = Solver::advise(&board, 2_000_000);
+
+        assert!(!advice.moves.is_empty(), "expected a reveal plan, not stuck");
+        assert!(
+            advice.moves.iter().any(|m| matches!(m, Move::Deal)),
+            "a deal must be built into the plan"
+        );
+        assert!(advice.uncovers >= 1, "the plan must reveal an unknown");
+
+        // The plan is legal (make would panic otherwise) and exposes exactly the
+        // promised unknown count when replayed.
+        let mut end = board.clone();
+        for &m in &advice.moves {
+            end.make(m);
+        }
+        assert_eq!(end.exposed_unknowns(), advice.uncovers);
+    }
+
+    #[test]
+    fn advise_with_unknown_stock_recommends_exactly_one_deal() {
+        // Same tableau, but the stock is unknown: the deal itself is the reveal,
+        // so the plan is a single Deal — we never plan past cards we can't see.
+        let mut board = frozen_known_stock_board();
+        for c in board.stock.iter_mut() {
+            *c = UNKNOWN;
+        }
+        let advice = Solver::advise(&board, 2_000_000);
+        assert_eq!(advice.moves, vec![Move::Deal]);
+        assert_eq!(advice.uncovers, 10);
     }
 }
