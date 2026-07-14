@@ -196,14 +196,37 @@ impl Solver {
     }
 }
 
+/// Cap on *consecutive* reversible moves in a reveal plan. A reversible move
+/// only shuffles face-up cards around; a committal one makes irreversible
+/// progress (see `is_committal`). Long runs of reversible moves are pure
+/// wandering — capping them keeps recovered plans tight and prunes the vast
+/// majority of the search space (which is reachable only via such wandering).
+const MAX_CONSEC_REVERSIBLE: u32 = 8;
+
+/// A board's "progress" scalars: fewer face-down cards, more completed runs,
+/// more empty columns, or less stock all mean irreversible progress was made.
+#[inline]
+fn progress_key(b: &Board) -> (u32, u8, u32, usize) {
+    (b.face_down_total(), b.completed, b.empty_columns(), b.stock.len())
+}
+
+/// Whether the move from `before` to `after` made irreversible progress:
+/// flipped a face-down card, completed a run, emptied a column, or dealt a row.
+/// Everything else just rearranges face-up cards and is reversible.
+#[inline]
+fn is_committal(before: (u32, u8, u32, usize), after: (u32, u8, u32, usize)) -> bool {
+    after.0 < before.0 || after.1 > before.1 || after.2 > before.2 || after.3 < before.3
+}
+
 /// Breadth-first search for the shortest plan that reveals unknown cards (or
 /// completes runs). When `allow_deals` is set, a deal may be used as a plan step;
 /// a deal whose row is fully known is a look-ahead the search plans past, while a
 /// deal that would turn up unknown cards is a *terminal* reveal (recorded but not
-/// expanded — you can't plan moves over cards you haven't seen). Returns `None`
-/// if no reachable plan reveals anything. Because BFS visits states in
-/// nondecreasing depth, the recovered plan is a shortest one — no redundant
-/// detours.
+/// expanded — you can't plan moves over cards you haven't seen). At most
+/// `MAX_CONSEC_REVERSIBLE` reversible moves may run consecutively, so plans never
+/// wander. Returns `None` if no reachable plan reveals anything. Because BFS
+/// visits states in nondecreasing depth, the recovered plan is a shortest one
+/// (under the cap) — no redundant detours.
 fn search_reveals(start_board: &Board, node_limit: u64, allow_deals: bool) -> Option<Advice> {
     let start = start_board.clone();
     let start_completed = start.completed;
@@ -219,6 +242,8 @@ fn search_reveals(start_board: &Board, node_limit: u64, allow_deals: bool) -> Op
     };
 
     let mut arena: Vec<Node> = vec![Node { parent: u32::MAX, mv: Move::Deal }];
+    // `reversibles[i]` = how many reversible moves run consecutively into node i.
+    let mut reversibles: Vec<u32> = vec![0];
     let mut visited: HashSet<u64> = HashSet::new();
     let mut queue: VecDeque<u32> = VecDeque::new();
     let mut nodes: u64 = 0;
@@ -231,6 +256,7 @@ fn search_reveals(start_board: &Board, node_limit: u64, allow_deals: bool) -> Op
 
     'bfs: while let Some(idx) = queue.pop_front() {
         let mut b = board_at(&start, &arena, idx);
+        let run = reversibles[idx as usize];
         // A deal that turns up unknown cards is itself the reveal, so we stop
         // planning past it; a fully-known-row deal is a look-ahead step.
         let terminal_deal = !next_row_known(&b);
@@ -244,10 +270,18 @@ fn search_reveals(start_board: &Board, node_limit: u64, allow_deals: bool) -> Op
             if nodes > node_limit {
                 break 'bfs;
             }
+            let before = progress_key(&b);
             let undo = b.make(m);
+            let committal = is_committal(before, progress_key(&b));
+            // Cap consecutive reversible moves — don't wander.
+            if !committal && run >= MAX_CONSEC_REVERSIBLE {
+                b.undo(&undo);
+                continue;
+            }
             if visited.insert(b.hash()) {
                 let ci = arena.len() as u32;
                 arena.push(Node { parent: idx, mv: m });
+                reversibles.push(if committal { 0 } else { run + 1 });
                 let r = reward(&b);
                 if r > best_reward {
                     best_reward = r;
@@ -574,11 +608,20 @@ mod tests {
         );
         assert!(advice.uncovers >= 1, "the plan must reveal an unknown");
 
-        // The plan is legal (make would panic otherwise) and exposes exactly the
-        // promised unknown count when replayed.
+        // The plan is legal (make would panic otherwise), exposes exactly the
+        // promised unknown count when replayed, and never wanders — no more than
+        // MAX_CONSEC_REVERSIBLE reversible moves run in a row.
         let mut end = board.clone();
+        let mut run = 0u32;
         for &m in &advice.moves {
+            let before = progress_key(&end);
             end.make(m);
+            if is_committal(before, progress_key(&end)) {
+                run = 0;
+            } else {
+                run += 1;
+                assert!(run <= MAX_CONSEC_REVERSIBLE, "plan wandered: {run} reversible moves in a row");
+            }
         }
         assert_eq!(end.exposed_unknowns(), advice.uncovers);
     }
