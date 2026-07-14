@@ -1,18 +1,6 @@
-import { useState } from 'react';
-import SolveView from './SolveView';
 import TrackSolve from './TrackSolve';
 
-type Mode = 'solve' | 'track';
-
 export default function App() {
-  const [mode, setMode] = useState<Mode>('solve');
-
-  const tab = (id: Mode, label: string) => (
-    <button className={`tab${mode === id ? ' active' : ''}`} onClick={() => setMode(id)}>
-      {label}
-    </button>
-  );
-
   return (
     <div className="app">
       <header>
@@ -22,13 +10,7 @@ export default function App() {
         </p>
       </header>
 
-      <div className="tabs">
-        {tab('solve', 'Solve a deal')}
-        {tab('track', 'Track & solve')}
-      </div>
-
-      {mode === 'solve' && <SolveView />}
-      {mode === 'track' && <TrackSolve />}
+      <TrackSolve />
     </div>
   );
 }

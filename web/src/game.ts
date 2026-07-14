@@ -6,17 +6,10 @@
 // (0=spades, 1=hearts, 2=clubs, 3=diamonds).
 
 export type Card = { rank: number; suit: number };
-export type ApiCard = { rank: number; suit: number; face_up: boolean };
 
 export type Move =
   | { type: 'tableau'; from: number; to: number; count: number }
   | { type: 'deal' };
-
-export type InitialBoard = {
-  columns: ApiCard[][];
-  stock: Card[];
-  stock_count: number;
-};
 
 export type Column = { cards: Card[]; faceDown: number };
 export type GameState = {
@@ -28,24 +21,6 @@ export type GameState = {
 };
 
 export const COLS = 10;
-
-/** Build the starting game state from the API's board payload. */
-export function initialState(board: InitialBoard): GameState {
-  const columns = board.columns.map((col) => {
-    let faceDown = 0;
-    for (const c of col) {
-      if (c.face_up) break;
-      faceDown++;
-    }
-    return { cards: col.map((c) => ({ rank: c.rank, suit: c.suit })), faceDown };
-  });
-  return {
-    columns,
-    stock: board.stock.map((c) => ({ rank: c.rank, suit: c.suit })),
-    completed: 0,
-    completedSuits: [],
-  };
-}
 
 function cloneState(s: GameState): GameState {
   return {
