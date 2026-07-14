@@ -198,14 +198,59 @@ impl Solver {
     /// Deeper, opt-in reveal search for positions where `advise` finds nothing.
     /// Where `advise` is a breadth-first search for the *shortest* reveal (and so
     /// gives up when the shortest one lies beyond its budget), this dives depth-
-    /// first and can uncover a card that is only reachable via a long maneuver —
-    /// e.g. emptying a column to free a pinned King. The consecutive-reversible
-    /// cap still applies, so the plan makes steady progress rather than wandering,
-    /// but the result can still be *long*; callers should warn before using it.
-    /// Returns an empty plan if even this finds nothing within budget.
+    /// first and can uncover a card only reachable via a long maneuver — e.g.
+    /// emptying a column to free a pinned King.
+    ///
+    /// A single depth-first pass finds an essentially arbitrary-length line (the
+    /// consecutive-reversible cap that keeps it from wandering also decides, more
+    /// or less by luck, how direct the route is). So this sweeps a ladder of caps
+    /// and keeps the *shortest* line found, tightening a depth bound as it
+    /// improves — later, tighter searches are cheap. The `node_limit` is a shared
+    /// budget across the whole sweep. The result can still be long; callers should
+    /// warn before using it. Returns an empty plan if nothing is found in budget.
     pub fn advise_deep(board: &Board, node_limit: u64, depth_limit: usize) -> Advice {
-        search_reveals_deep(board, node_limit, depth_limit)
-            .unwrap_or(Advice { uncovers: 0, completes: 0, empties: board.empty_columns(), moves: Vec::new() })
+        let start_completed = board.completed;
+        let mut best: Option<Vec<Move>> = None;
+        let mut remaining = node_limit;
+
+        // A reveal this short is already fine for a "here's a deep line" warning;
+        // stop refining once we have one and don't burn budget chasing a few
+        // fewer moves.
+        const GOOD_ENOUGH: usize = 60;
+
+        for cap in [2u32, 3, 4, 5, 6, 8] {
+            if remaining == 0 || best.as_ref().is_some_and(|p| p.len() <= GOOD_ENOUGH) {
+                break;
+            }
+            // Only look for a line shorter than the best so far.
+            let depth = best.as_ref().map_or(depth_limit, |p| p.len().saturating_sub(1));
+            if depth == 0 {
+                break;
+            }
+            let (found, used) = search_reveals_deep(board, remaining, depth, cap);
+            remaining = remaining.saturating_sub(used);
+            if let Some(moves) = found {
+                if best.as_ref().map_or(true, |b| moves.len() < b.len()) {
+                    best = Some(moves);
+                }
+            }
+        }
+
+        match best {
+            Some(moves) => {
+                let mut end = board.clone();
+                for &m in &moves {
+                    end.make(m);
+                }
+                Advice {
+                    uncovers: end.exposed_unknowns(),
+                    completes: (end.completed - start_completed) as u32,
+                    empties: end.empty_columns(),
+                    moves,
+                }
+            }
+            None => Advice { uncovers: 0, completes: 0, empties: board.empty_columns(), moves: Vec::new() },
+        }
     }
 }
 
@@ -325,15 +370,19 @@ fn search_reveals(start_board: &Board, node_limit: u64, allow_deals: bool) -> Op
     })
 }
 
-/// Depth-first hunt for *any* reveal (not necessarily the shortest), bounded by
-/// `node_limit` states and `depth_limit` moves. Same reversible cap and deal
-/// handling as `search_reveals`, but DFS reaches deep reveals a breadth-first
-/// search can't afford to. Explores each board once (`visited`), so it always
-/// terminates; the recovered plan can be long. Returns `None` if nothing within
-/// the limits reveals a card.
-fn search_reveals_deep(start_board: &Board, node_limit: u64, depth_limit: usize) -> Option<Advice> {
+/// One depth-first pass: find the first line (up to `depth_limit` moves, at most
+/// `max_reversible` reversible moves in a row) that reveals a card. Same deal
+/// handling as `search_reveals`, but DFS reaches reveals a breadth-first search
+/// can't afford. Explores each board once (`visited`), so it always terminates.
+/// Returns the plan (if any) and how many nodes it spent, so the caller can run
+/// several passes against a shared budget.
+fn search_reveals_deep(
+    start_board: &Board,
+    node_limit: u64,
+    depth_limit: usize,
+    max_reversible: u32,
+) -> (Option<Vec<Move>>, u64) {
     let start = start_board.clone();
-    let start_completed = start.completed;
 
     let next_row_known = |b: &Board| -> bool {
         let n = b.stock.len();
@@ -375,7 +424,7 @@ fn search_reveals_deep(start_board: &Board, node_limit: u64, depth_limit: usize)
         let before = progress_key(&b);
         let undo = b.make(m);
         let committal = is_committal(before, progress_key(&b));
-        if !committal && run >= MAX_CONSEC_REVERSIBLE {
+        if !committal && run >= max_reversible {
             b.undo(&undo);
             continue;
         }
@@ -388,16 +437,7 @@ fn search_reveals_deep(start_board: &Board, node_limit: u64, depth_limit: usize)
         if b.exposed_unknowns() > 0 {
             let mut moves: Vec<Move> = stack.iter().filter_map(|f| f.via).collect();
             moves.push(m);
-            let mut end = start.clone();
-            for &mm in &moves {
-                end.make(mm);
-            }
-            return Some(Advice {
-                uncovers: end.exposed_unknowns(),
-                completes: (end.completed - start_completed) as u32,
-                empties: end.empty_columns(),
-                moves,
-            });
+            return (Some(moves), nodes);
         }
 
         // Dive unless we've hit the depth cap, this deal is terminal (can't plan
@@ -412,7 +452,7 @@ fn search_reveals_deep(start_board: &Board, node_limit: u64, depth_limit: usize)
         }
     }
 
-    None
+    (None, nodes)
 }
 
 /// Estimated moves remaining (0 exactly at a win). Not admissible — it's tuned
@@ -734,10 +774,13 @@ mod tests {
         // The deep DFS must find a legal, revealing plan, and — like the BFS —
         // never run more than MAX_CONSEC_REVERSIBLE reversible moves in a row.
         let board = frozen_known_stock_board();
-        let advice = Solver::advise_deep(&board, 5_000_000, 2_000);
+        let advice = Solver::advise_deep(&board, 25_000_000, 200);
 
         assert!(!advice.moves.is_empty(), "deep search should find a reveal");
         assert!(advice.uncovers >= 1);
+        // The cap ladder keeps the shortest line, so it stays reasonable — not
+        // the thousands-of-moves a single wandering pass can produce.
+        assert!(advice.moves.len() <= 200, "deep plan too long: {}", advice.moves.len());
 
         let mut end = board.clone();
         let mut run = 0u32;

@@ -351,11 +351,11 @@ struct PlanRequest {
 }
 
 fn default_deep_nodes() -> u64 {
-    40_000_000
+    25_000_000
 }
 
 fn default_deep_depth() -> usize {
-    2_000
+    200
 }
 
 #[derive(Serialize)]
