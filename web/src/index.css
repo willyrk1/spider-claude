@@ -88,7 +88,7 @@ button.primary { background: var(--accent); color: #23303a; border-color: var(--
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .cr-err { color: #e08a8a; font-size: 12px; }
-.move-list { margin: 8px 0 4px; padding-left: 22px; line-height: 1.7; }
+.move-list { margin: 8px 0 4px; padding-left: 22px; line-height: 1.7; max-height: 320px; overflow-y: auto; }
 .board-title { font-size: 14px; color: var(--muted); margin: 18px 0 6px; font-weight: 600; }
 
 /* Track & solve */

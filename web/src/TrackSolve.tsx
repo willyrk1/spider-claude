@@ -65,6 +65,8 @@ export default function TrackSolve() {
   const [sessionText, setSessionText] = useState('');
   const [copied, setCopied] = useState(false);
   const [deduced, setDeduced] = useState<string | null>(null);
+  // A deep-search plan is shown only after the user confirms (it can be long).
+  const [deepConfirmed, setDeepConfirmed] = useState(false);
 
   // Solve-phase player.
   const [states, setStates] = useState<GameState[] | null>(null);
@@ -167,7 +169,7 @@ export default function TrackSolve() {
     setResp(null);
   }
 
-  async function onPlan() {
+  async function onPlan(deep = false) {
     if (unfilled) {
       setError('Fill in the revealed (?) cards first.');
       return;
@@ -176,12 +178,14 @@ export default function TrackSolve() {
     setError(null);
     setPlaying(false);
     setStates(null);
+    setDeepConfirmed(false);
     try {
       const r = await plan({
         suits,
         columns: planColumns(board, deal),
         stock: planStock(board, deal),
         allow_deal_with_empty: ALLOW_DEAL_WITH_EMPTY_COLUMNS,
+        deep,
       });
       setResp(r);
       if (r.phase === 'solve') {
@@ -237,7 +241,7 @@ export default function TrackSolve() {
             <option value={4}>4</option>
           </select>
         </label>
-        <button className="primary" onClick={onPlan} disabled={loading || unfilled}>
+        <button className="primary" onClick={() => onPlan()} disabled={loading || unfilled}>
           {loading ? 'Thinking…' : fullyKnown(board, deal) ? 'Solve!' : 'Get next steps'}
         </button>
         <button onClick={dealRow} disabled={!canDeal} title={canDeal ? '' : 'Deal needs cards in the stock, no empty columns, and no unfilled ? cards'}>
@@ -306,17 +310,39 @@ export default function TrackSolve() {
       {resp && resp.phase !== 'solve' && (
         <>
           <div className={`banner ${resp.phase === 'discover' ? 'good' : 'warn'}`}>{resp.note}</div>
-          {resp.moves.length > 0 && (
-            <>
-              <ol className="move-list">
-                {resp.moves.map((m, i) => (
-                  <li key={i}>{describeMove(m)}</li>
-                ))}
-              </ol>
-              <button className="primary" onClick={applyMoves}>
-                Apply these moves ↴
-              </button>
-            </>
+
+          {/* Normal search came up empty — offer the slower, deeper search. */}
+          {resp.phase === 'stuck' && !resp.deep && (
+            <button className="primary" onClick={() => onPlan(true)} disabled={loading}>
+              {loading ? 'Searching deeper…' : '🔎 Search deeper (slow; may return a long plan)'}
+            </button>
+          )}
+
+          {resp.moves.length > 0 && resp.deep && !deepConfirmed ? (
+            /* Deep plan found — warn and confirm before showing/applying it. */
+            <div className="banner warn">
+              ⚠ This is a <b>{resp.moves.length}-move</b> maneuver — long and
+              committal. Continue only if you want to play it all out.
+              <div className="session-actions" style={{ marginTop: 8 }}>
+                <button className="primary" onClick={() => setDeepConfirmed(true)}>
+                  Show the {resp.moves.length}-move plan
+                </button>
+                <button onClick={() => setResp(null)}>Cancel</button>
+              </div>
+            </div>
+          ) : (
+            resp.moves.length > 0 && (
+              <>
+                <ol className="move-list">
+                  {resp.moves.map((m, i) => (
+                    <li key={i}>{describeMove(m)}</li>
+                  ))}
+                </ol>
+                <button className="primary" onClick={applyMoves}>
+                  Apply these moves ↴
+                </button>
+              </>
+            )
           )}
         </>
       )}

@@ -343,6 +343,19 @@ struct PlanRequest {
     /// false — the standard rule forbids it).
     #[serde(default)]
     allow_deal_with_empty: bool,
+    /// Opt in to the deeper, depth-first reveal search when the normal one finds
+    /// nothing. It can uncover a card reachable only via a long maneuver, but the
+    /// plan may be very long — the client should warn before using it.
+    #[serde(default)]
+    deep: bool,
+}
+
+fn default_deep_nodes() -> u64 {
+    40_000_000
+}
+
+fn default_deep_depth() -> usize {
+    2_000
 }
 
 #[derive(Serialize)]
@@ -359,6 +372,10 @@ struct PlanResponse {
     winning_config: Option<ConfigDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     nodes_searched: Option<u64>,
+    /// True when this plan came from the opt-in deep search — the client should
+    /// warn (and confirm) before using it, since it may be very long.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deep: Option<bool>,
 }
 
 fn to_card(c: &Option<CardInput>, suits: u8) -> Result<Card, String> {
@@ -404,16 +421,45 @@ async fn plan(Json(req): Json<PlanRequest>) -> Result<Json<PlanResponse>, (Statu
     board.allow_deal_with_empty = req.allow_deal_with_empty;
 
     if board.has_unknowns() {
-        // Discovery: uncover more face-down cards.
+        // Discovery: uncover more face-down cards. Normal search first (shortest
+        // reveal within a small budget); if that's stuck and the caller opted in,
+        // fall back to the deeper depth-first search.
         let b = board.clone();
-        let advice: Advice = tokio::task::spawn_blocking(move || Solver::advise(&b, req.advise_nodes))
+        let mut advice: Advice = tokio::task::spawn_blocking(move || Solver::advise(&b, req.advise_nodes))
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let mut used_deep = false;
+        if advice.moves.is_empty() && req.deep {
+            let b = board.clone();
+            advice = tokio::task::spawn_blocking(move || {
+                Solver::advise_deep(&b, default_deep_nodes(), default_deep_depth())
+            })
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            used_deep = true;
+        }
         let deals = advice.moves.iter().filter(|m| matches!(m, Move::Deal)).count();
         let (phase, note) = if advice.moves.is_empty() {
+            if used_deep {
+                (
+                    "stuck",
+                    "Even a deep search found no way to reveal a card within its budget — this line is very likely a dead end. Use ↶ Undo to back up and try a different one.".to_string(),
+                )
+            } else {
+                (
+                    "stuck",
+                    "Nothing new can be revealed by the normal search — no short sequence reaches an unknown card. Use ↶ Undo to back up, or try a deeper search.".to_string(),
+                )
+            }
+        } else if used_deep {
             (
-                "stuck",
-                "Nothing new can be revealed — no move reaches an unknown card, and dealing wouldn't turn one up either. Use ↶ Undo to back up and try a different line.".to_string(),
+                "discover",
+                format!(
+                    "Deep search: a {}-move line ({}) reveals {} unknown card(s) — but it's a long, committal maneuver. Review it before playing it out.",
+                    advice.moves.len(),
+                    if deals == 1 { "1 deal".to_string() } else { format!("{deals} deals") },
+                    advice.uncovers
+                ),
             )
         } else if advice.moves.len() == 1 && deals == 1 {
             (
@@ -448,6 +494,7 @@ async fn plan(Json(req): Json<PlanRequest>) -> Result<Json<PlanResponse>, (Statu
             verified: None,
             winning_config: None,
             nodes_searched: None,
+            deep: if used_deep { Some(true) } else { None },
         }));
     }
 
@@ -473,6 +520,7 @@ async fn plan(Json(req): Json<PlanRequest>) -> Result<Json<PlanResponse>, (Statu
                 verified: Some(check.is_won()),
                 winning_config: result.winning_config.map(|(weight, fdw)| ConfigDto { weight, fdw }),
                 nodes_searched: Some(result.nodes),
+                deep: None,
             }))
         }
         None => Ok(Json(PlanResponse {
@@ -483,6 +531,7 @@ async fn plan(Json(req): Json<PlanRequest>) -> Result<Json<PlanResponse>, (Statu
             verified: None,
             winning_config: None,
             nodes_searched: Some(result.nodes),
+            deep: None,
         })),
     }
 }

@@ -20,7 +20,7 @@ use std::collections::{BinaryHeap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
-use crate::board::{Board, Move, COLS};
+use crate::board::{Board, Move, Undo, COLS};
 use crate::card::{is_unknown, rank, suit};
 
 /// Default weight on the heuristic. `w = 1` is optimal but slow with a weak
@@ -194,6 +194,19 @@ impl Solver {
 
         Advice { uncovers: 0, completes: 0, empties: board.empty_columns(), moves: Vec::new() }
     }
+
+    /// Deeper, opt-in reveal search for positions where `advise` finds nothing.
+    /// Where `advise` is a breadth-first search for the *shortest* reveal (and so
+    /// gives up when the shortest one lies beyond its budget), this dives depth-
+    /// first and can uncover a card that is only reachable via a long maneuver —
+    /// e.g. emptying a column to free a pinned King. The consecutive-reversible
+    /// cap still applies, so the plan makes steady progress rather than wandering,
+    /// but the result can still be *long*; callers should warn before using it.
+    /// Returns an empty plan if even this finds nothing within budget.
+    pub fn advise_deep(board: &Board, node_limit: u64, depth_limit: usize) -> Advice {
+        search_reveals_deep(board, node_limit, depth_limit)
+            .unwrap_or(Advice { uncovers: 0, completes: 0, empties: board.empty_columns(), moves: Vec::new() })
+    }
 }
 
 /// Cap on *consecutive* reversible moves in a reveal plan. A reversible move
@@ -310,6 +323,96 @@ fn search_reveals(start_board: &Board, node_limit: u64, allow_deals: bool) -> Op
         empties: end.empty_columns(),
         moves,
     })
+}
+
+/// Depth-first hunt for *any* reveal (not necessarily the shortest), bounded by
+/// `node_limit` states and `depth_limit` moves. Same reversible cap and deal
+/// handling as `search_reveals`, but DFS reaches deep reveals a breadth-first
+/// search can't afford to. Explores each board once (`visited`), so it always
+/// terminates; the recovered plan can be long. Returns `None` if nothing within
+/// the limits reveals a card.
+fn search_reveals_deep(start_board: &Board, node_limit: u64, depth_limit: usize) -> Option<Advice> {
+    let start = start_board.clone();
+    let start_completed = start.completed;
+
+    let next_row_known = |b: &Board| -> bool {
+        let n = b.stock.len();
+        n >= COLS && b.stock[n - COLS..].iter().all(|&c| !is_unknown(c))
+    };
+
+    struct Frame {
+        moves: Vec<Move>,
+        idx: usize,
+        undo: Option<Undo>,
+        via: Option<Move>,
+        run: u32, // consecutive reversible moves leading into this state
+    }
+
+    let mut b = start.clone();
+    let mut visited: HashSet<u64> = HashSet::new();
+    visited.insert(b.hash());
+    let mut stack: Vec<Frame> = Vec::new();
+    {
+        let mut mv = Vec::new();
+        b.gen_moves(&mut mv);
+        stack.push(Frame { moves: mv, idx: 0, undo: None, via: None, run: 0 });
+    }
+    let mut nodes: u64 = 0;
+
+    while let Some(top) = stack.last_mut() {
+        if top.idx >= top.moves.len() {
+            let f = stack.pop().unwrap();
+            if let Some(u) = f.undo {
+                b.undo(&u);
+            }
+            continue;
+        }
+        let run = top.run;
+        let m = top.moves[top.idx];
+        top.idx += 1;
+
+        let terminal_deal = matches!(m, Move::Deal) && !next_row_known(&b);
+        let before = progress_key(&b);
+        let undo = b.make(m);
+        let committal = is_committal(before, progress_key(&b));
+        if !committal && run >= MAX_CONSEC_REVERSIBLE {
+            b.undo(&undo);
+            continue;
+        }
+        nodes += 1;
+        if nodes > node_limit {
+            b.undo(&undo);
+            break;
+        }
+
+        if b.exposed_unknowns() > 0 {
+            let mut moves: Vec<Move> = stack.iter().filter_map(|f| f.via).collect();
+            moves.push(m);
+            let mut end = start.clone();
+            for &mm in &moves {
+                end.make(mm);
+            }
+            return Some(Advice {
+                uncovers: end.exposed_unknowns(),
+                completes: (end.completed - start_completed) as u32,
+                empties: end.empty_columns(),
+                moves,
+            });
+        }
+
+        // Dive unless we've hit the depth cap, this deal is terminal (can't plan
+        // past unseen cards), or we've been here before.
+        if !terminal_deal && stack.len() < depth_limit && visited.insert(b.hash()) {
+            let mut mv = Vec::new();
+            b.gen_moves(&mut mv);
+            let nc = if committal { 0 } else { run + 1 };
+            stack.push(Frame { moves: mv, idx: 0, undo: Some(undo), via: Some(m), run: nc });
+        } else {
+            b.undo(&undo);
+        }
+    }
+
+    None
 }
 
 /// Estimated moves remaining (0 exactly at a win). Not admissible — it's tuned
@@ -621,6 +724,31 @@ mod tests {
             } else {
                 run += 1;
                 assert!(run <= MAX_CONSEC_REVERSIBLE, "plan wandered: {run} reversible moves in a row");
+            }
+        }
+        assert_eq!(end.exposed_unknowns(), advice.uncovers);
+    }
+
+    #[test]
+    fn advise_deep_finds_a_reveal_and_respects_the_cap() {
+        // The deep DFS must find a legal, revealing plan, and — like the BFS —
+        // never run more than MAX_CONSEC_REVERSIBLE reversible moves in a row.
+        let board = frozen_known_stock_board();
+        let advice = Solver::advise_deep(&board, 5_000_000, 2_000);
+
+        assert!(!advice.moves.is_empty(), "deep search should find a reveal");
+        assert!(advice.uncovers >= 1);
+
+        let mut end = board.clone();
+        let mut run = 0u32;
+        for &m in &advice.moves {
+            let before = progress_key(&end);
+            end.make(m);
+            if is_committal(before, progress_key(&end)) {
+                run = 0;
+            } else {
+                run += 1;
+                assert!(run <= MAX_CONSEC_REVERSIBLE, "deep plan wandered: {run} in a row");
             }
         }
         assert_eq!(end.exposed_unknowns(), advice.uncovers);
