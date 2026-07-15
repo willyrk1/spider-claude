@@ -97,6 +97,15 @@ export default function TrackSolve() {
   const [states, setStates] = useState<GameState[] | null>(null);
   const [step, setStep] = useState(0);
   const [playing, setPlaying] = useState(false);
+  // Bumped on each *forward* step so the board animates the moved cards.
+  // Back/jump/scrub leave it unchanged, so those update instantly.
+  const [animNonce, setAnimNonce] = useState(0);
+
+  /** Advance one move, animating the cards. Used by Next and Play. */
+  function advance() {
+    setAnimNonce((n) => n + 1);
+    setStep((s) => Math.min((states?.length ?? 1) - 1, s + 1));
+  }
 
   useEffect(() => {
     try {
@@ -133,7 +142,7 @@ export default function TrackSolve() {
       setPlaying(false);
       return;
     }
-    const id = setTimeout(() => setStep((s) => s + 1), 220);
+    const id = setTimeout(advance, 260);
     return () => clearTimeout(id);
   }, [playing, step, states]);
 
@@ -409,7 +418,7 @@ export default function TrackSolve() {
             <button className="primary" onClick={() => setPlaying((p) => !p)} disabled={step >= states!.length - 1}>
               {playing ? '❚❚ Pause' : '▶ Play'}
             </button>
-            <button onClick={() => { setPlaying(false); setStep((s) => Math.min(states!.length - 1, s + 1)); }} disabled={step >= states!.length - 1}>▶</button>
+            <button onClick={() => { setPlaying(false); advance(); }} disabled={step >= states!.length - 1}>▶</button>
             <button onClick={() => { setPlaying(false); setStep(states!.length - 1); }}>⏭</button>
             <span className="counter">move {step} / {states!.length - 1}</span>
           </div>
@@ -421,7 +430,13 @@ export default function TrackSolve() {
             suits={states![step].completedSuits}
             justCompleted={step > 0 && states![step].completed > states![step - 1].completed}
           />
-          <Board state={states![step]} move={currentMove} showStock={false} />
+          <Board
+            state={states![step]}
+            move={currentMove}
+            showStock={false}
+            prevState={step > 0 ? states![step - 1] : null}
+            animNonce={animNonce}
+          />
         </div>
       )}
 
