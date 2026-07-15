@@ -7,8 +7,12 @@ import {
   cardToShort,
   computeStates,
   deduceLastUnknown,
+  decodeActions,
+  decodeDeal,
   deriveBoard,
   describeMove,
+  encodeActions,
+  encodeDeal,
   fillOnlyUnknown,
   fullyKnown,
   hasUnrevealed,
@@ -33,8 +37,10 @@ const STORAGE_KEY = 'spider-track-session';
 // default matches).
 const ALLOW_DEAL_WITH_EMPTY_COLUMNS = false;
 
+type Session = { suits: number; deal: InitialDeal; actions: Action[] };
+
 /** Restore the saved session (initial deal + actions) from this browser. */
-function loadSaved(): { suits: number; deal: InitialDeal; actions: Action[] } | null {
+function loadSaved(): Session | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
@@ -45,6 +51,25 @@ function loadSaved(): { suits: number; deal: InitialDeal; actions: Action[] } | 
   }
 }
 
+/** Read the game state from the URL query params (`d` deal, `m` moves). */
+function loadFromUrl(): Session | null {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const d = params.get('d');
+    if (!d) return null;
+    const decoded = decodeDeal(d);
+    if (!decoded) return null;
+    const actions = decodeActions(params.get('m') ?? '');
+    if (actions === null) return null;
+    return { suits: decoded.suits, deal: decoded.deal, actions };
+  } catch {
+    return null;
+  }
+}
+
+/** URL params take priority over the browser's saved session, if present. */
+const initialSession = loadFromUrl() ?? loadSaved();
+
 /**
  * Track a real game as you reveal cards; solve it once everything is known.
  * The session is the (partially-known) initial deal plus a log of actions
@@ -53,9 +78,9 @@ function loadSaved(): { suits: number; deal: InitialDeal; actions: Action[] } | 
  * a saved session reproduces the game exactly.
  */
 export default function TrackSolve() {
-  const [suits, setSuits] = useState<number>(() => loadSaved()?.suits ?? 4);
-  const [deal, setDeal] = useState<InitialDeal>(() => loadSaved()?.deal ?? newInitialDeal());
-  const [actions, setActions] = useState<Action[]>(() => loadSaved()?.actions ?? []);
+  const [suits, setSuits] = useState<number>(() => initialSession?.suits ?? 4);
+  const [deal, setDeal] = useState<InitialDeal>(() => initialSession?.deal ?? newInitialDeal());
+  const [actions, setActions] = useState<Action[]>(() => initialSession?.actions ?? []);
   const board = useMemo(() => deriveBoard(deal, actions), [deal, actions]);
 
   const [resp, setResp] = useState<PlanResponse | null>(null);
@@ -79,6 +104,17 @@ export default function TrackSolve() {
     } catch {
       /* ignore */
     }
+  }, [suits, deal, actions]);
+
+  // Mirror the game state into the URL: `d` = initial deal (with unknowns),
+  // `m` = the moves so far. Both change as you play, and opening the page with
+  // them reproduces the game. replaceState keeps it out of the history stack.
+  useEffect(() => {
+    const params = new URLSearchParams();
+    params.set('d', encodeDeal(suits, deal));
+    const m = encodeActions(actions);
+    if (m) params.set('m', m);
+    window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`);
   }, [suits, deal, actions]);
 
   // When only one card is left unknown, deduce it — you never need to uncover
@@ -114,6 +150,15 @@ export default function TrackSolve() {
     setStates(null);
     setDrafts({});
     setDeduced(null);
+  }
+
+  /** Back to the original deal: drop every move/deal, keep revealed cards. */
+  function backToStart() {
+    setActions([]);
+    setResp(null);
+    setError(null);
+    setStates(null);
+    setDrafts({});
   }
 
   /** Undo the last *action* (move or deal). Revealed cards stay known. */
@@ -249,6 +294,9 @@ export default function TrackSolve() {
         </button>
         <button onClick={undo} disabled={actions.length === 0} title="Undo the last move or deal">
           ↶ Undo
+        </button>
+        <button onClick={backToStart} disabled={actions.length === 0} title="Rewind all moves and deals back to the original deal">
+          ⟲ Original deal
         </button>
         <button onClick={reset}>New game</button>
       </div>

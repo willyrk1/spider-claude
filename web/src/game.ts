@@ -370,6 +370,97 @@ export function serializeTrack(suits: number, deal: InitialDeal, actions: Action
   return lines.join('\n');
 }
 
+// ---- Compact URL encoding (initial deal + moves as two query params) ----
+//
+// The game state lives in the URL: `d` encodes the (partially-known) initial
+// deal, `m` encodes the action log. Both change as you play; opening the page
+// with them reproduces the game. Kept compact so the URL stays shareable.
+//
+// A card is one char: index (rank-1)*4 + suit into a 52-char alphabet; an
+// unknown card is '-'. The deal is `suits` + 54 tableau cards + 50 stock cards
+// (fixed sizes, so no delimiters needed) = 105 chars.
+
+const CARD_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+
+function encodeCard(c: Card | null): string {
+  return c ? CARD_ALPHABET[(c.rank - 1) * 4 + c.suit] : '-';
+}
+
+/** Decode one card char; '-' → null (unknown); returns undefined if invalid. */
+function decodeCard(ch: string): Card | null | undefined {
+  if (ch === '-') return null;
+  const i = CARD_ALPHABET.indexOf(ch);
+  if (i < 0) return undefined;
+  return { rank: Math.floor(i / 4) + 1, suit: i % 4 };
+}
+
+/** Encode the initial deal (with unknowns) into the `d` query param value. */
+export function encodeDeal(suits: number, deal: InitialDeal): string {
+  let s = String(suits);
+  for (const col of deal.tableau) for (const c of col) s += encodeCard(c);
+  for (const c of deal.stock) s += encodeCard(c);
+  return s;
+}
+
+export function decodeDeal(str: string): { suits: number; deal: InitialDeal } | null {
+  const total = 1 + TABLEAU_SIZES.reduce((a, b) => a + b, 0) + 50; // 105
+  if (str.length !== total) return null;
+  const suits = Number(str[0]);
+  if (suits !== 1 && suits !== 2 && suits !== 4) return null;
+  let i = 1;
+  const readCards = (n: number): (Card | null)[] | null => {
+    const out: (Card | null)[] = [];
+    for (let k = 0; k < n; k++) {
+      const c = decodeCard(str[i++]);
+      if (c === undefined) return null;
+      out.push(c);
+    }
+    return out;
+  };
+  const tableau: (Card | null)[][] = [];
+  for (const n of TABLEAU_SIZES) {
+    const col = readCards(n);
+    if (!col) return null;
+    tableau.push(col);
+  }
+  const stock = readCards(50);
+  if (!stock) return null;
+  return { suits, deal: { tableau, stock } };
+}
+
+/**
+ * Encode the action log into the `m` query param value. A deal is '.'; a move
+ * is three chars: from digit, to digit, count in base 36 (counts stay < 36).
+ */
+export function encodeActions(actions: Action[]): string {
+  let s = '';
+  for (const a of actions) {
+    s += a.kind === 'deal' ? '.' : String(a.from) + String(a.to) + a.count.toString(36);
+  }
+  return s;
+}
+
+export function decodeActions(str: string): Action[] | null {
+  const actions: Action[] = [];
+  let i = 0;
+  while (i < str.length) {
+    if (str[i] === '.') {
+      actions.push({ kind: 'deal' });
+      i++;
+      continue;
+    }
+    if (i + 3 > str.length) return null;
+    const from = Number(str[i]);
+    const to = Number(str[i + 1]);
+    const count = parseInt(str[i + 2], 36);
+    if (!Number.isInteger(from) || !Number.isInteger(to) || Number.isNaN(count)) return null;
+    if (from < 0 || from > 9 || to < 0 || to > 9 || count < 1) return null;
+    actions.push({ kind: 'move', from, to, count });
+    i += 3;
+  }
+  return actions;
+}
+
 export function parseTrack(
   text: string,
 ): { suits?: number; deal?: InitialDeal; actions?: Action[]; error?: string } {
