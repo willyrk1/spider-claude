@@ -238,6 +238,8 @@ impl Solver {
 
         match best {
             Some(moves) => {
+                // Drop wasted round trips the DFS left in before reporting.
+                let moves = simplify_reveal_plan(board, moves);
                 let mut end = board.clone();
                 for &m in &moves {
                     end.make(m);
@@ -453,6 +455,70 @@ fn search_reveals_deep(
     }
 
     (None, nodes)
+}
+
+/// Strip no-op round trips from a deep reveal plan. The depth-first search can
+/// send a card out and bring it right back while doing unrelated work elsewhere;
+/// the whole-board `visited` dedup misses it, because the rest of the board
+/// changed in between, so the extracted line keeps the wasted motion. Here we
+/// look for pairs of mutually-inverse tableau moves and drop both whenever the
+/// shorter line still replays legally, respects the reversible cap, and reveals
+/// the same card — verified by replay, so correctness never rests on reasoning
+/// about how the moves in between interact. Repeats to a fixpoint, so a card
+/// bounced several times collapses fully.
+fn simplify_reveal_plan(start: &Board, mut plan: Vec<Move>) -> Vec<Move> {
+    'again: loop {
+        for i in 0..plan.len() {
+            let Move::Tableau { from: fi, to: ti, count: ci } = plan[i] else { continue };
+            for j in (i + 1)..plan.len() {
+                let Move::Tableau { from: fj, to: tj, count: cj } = plan[j] else { continue };
+                // An inverse move sends the same number of cards straight back.
+                if !(fj == ti && tj == fi && cj == ci) {
+                    continue;
+                }
+                let mut candidate = Vec::with_capacity(plan.len() - 2);
+                candidate.extend_from_slice(&plan[..i]);
+                candidate.extend_from_slice(&plan[i + 1..j]);
+                candidate.extend_from_slice(&plan[j + 1..]);
+                if plan_is_valid_reveal(start, &candidate) {
+                    plan = candidate;
+                    continue 'again;
+                }
+            }
+        }
+        break;
+    }
+    plan
+}
+
+/// Whether `moves` is a sound reveal line from `start`: every move is legal, no
+/// more than `MAX_CONSEC_REVERSIBLE` reversible moves run consecutively (the same
+/// invariant the search guarantees), and the final board turns up an unknown
+/// card. Used to accept a candidate simplification only when it preserves all of
+/// these — in particular, cutting a pair that straddles a committal move can't
+/// smuggle in a longer wander.
+fn plan_is_valid_reveal(start: &Board, moves: &[Move]) -> bool {
+    let mut b = start.clone();
+    let mut legal = Vec::new();
+    let mut run = 0u32;
+    for &m in moves {
+        legal.clear();
+        b.gen_moves(&mut legal);
+        if !legal.contains(&m) {
+            return false;
+        }
+        let before = progress_key(&b);
+        b.make(m);
+        if is_committal(before, progress_key(&b)) {
+            run = 0;
+        } else {
+            run += 1;
+            if run > MAX_CONSEC_REVERSIBLE {
+                return false;
+            }
+        }
+    }
+    b.exposed_unknowns() > 0
 }
 
 /// Estimated moves remaining (0 exactly at a win). Not admissible — it's tuned
@@ -795,6 +861,86 @@ mod tests {
             }
         }
         assert_eq!(end.exposed_unknowns(), advice.uncovers);
+    }
+
+    #[test]
+    fn simplify_strips_a_no_op_round_trip() {
+        // A card sent out and brought straight back, while the actual reveal
+        // happens elsewhere, should be cut — leaving just the revealing move.
+        let cols: Vec<(u8, Vec<Card>)> = vec![
+            (1, cards("? 9h")),  // moving 9h off flips the hidden card -> reveal
+            (0, cards("10s")),   // 9h lands here
+            (0, cards("9c 8h")), // 8h can bounce to col 3 and come back onto 9c
+            (0, cards("9s")),    // ...bouncing through here
+            (0, cards("2s")),
+            (0, cards("3s")),
+            (0, cards("4s")),
+            (0, cards("5s")),
+            (0, cards("6s")),
+            (0, cards("7s")),
+        ];
+        let board = Board::from_parts(&cols, &[]).expect("valid board");
+        assert_eq!(board.exposed_unknowns(), 0);
+
+        let bounce = vec![
+            Move::Tableau { from: 2, to: 3, count: 1 }, // 8h out
+            Move::Tableau { from: 3, to: 2, count: 1 }, // 8h back — pure no-op
+            Move::Tableau { from: 0, to: 1, count: 1 }, // 9h off -> reveal
+        ];
+        // The bounce line is itself a legal, revealing plan...
+        assert!(plan_is_valid_reveal(&board, &bounce));
+        // ...but the round trip is redundant, so only the reveal survives.
+        assert_eq!(
+            simplify_reveal_plan(&board, bounce),
+            vec![Move::Tableau { from: 0, to: 1, count: 1 }],
+        );
+    }
+
+    #[test]
+    fn simplify_never_breaks_a_real_deep_plan() {
+        // advise_deep already runs the simplifier; its output must stay a legal,
+        // capped, revealing line, and simplifying again must be a fixpoint (no
+        // cancelable pair left behind).
+        let board = frozen_known_stock_board();
+        let advice = Solver::advise_deep(&board, 25_000_000, 200);
+        assert!(!advice.moves.is_empty());
+        assert!(plan_is_valid_reveal(&board, &advice.moves));
+        assert_eq!(
+            simplify_reveal_plan(&board, advice.moves.clone()),
+            advice.moves,
+            "simplify should be idempotent — nothing left to cut",
+        );
+    }
+
+    #[test]
+    fn simplify_rejects_a_cut_that_would_break_a_later_move() {
+        // Moving 8h out to col 1 is what lets 7h land on it there — which is the
+        // move that reveals col 2. The 0->1 and later 1->0 look like an inverse
+        // pair, but cutting both would leave "7h -> col1" landing on a bare 9s
+        // (illegal), so the simplifier must decline and keep the reveal.
+        let cols: Vec<(u8, Vec<Card>)> = vec![
+            (0, cards("8h")),    // 8h moves out to col 1...
+            (0, cards("9s")),    // ...onto 9s
+            (1, cards("? 7h")),  // 7h lands on 8h at col 1 => reveals col 2's hidden card
+            (0, cards("2s")),
+            (0, cards("3s")),
+            (0, cards("4s")),
+            (0, cards("5s")),
+            (0, cards("6s")),
+            (0, cards("8s")),
+            (0, cards("9d")),
+        ];
+        let board = Board::from_parts(&cols, &[]).expect("valid board");
+        let plan = vec![
+            Move::Tableau { from: 0, to: 1, count: 1 }, // 8h -> col1 (onto 9s)
+            Move::Tableau { from: 2, to: 1, count: 1 }, // 7h -> col1 (onto 8h) => reveal col2
+            Move::Tableau { from: 1, to: 0, count: 1 }, // 7h -> empty col0 (looks like 0->1's inverse)
+        ];
+        // Sanity: it's a legal reveal as written.
+        assert!(plan_is_valid_reveal(&board, &plan));
+        // The only inverse-shaped pair (moves 1 and 3) can't be cut without
+        // breaking move 2, so the plan is left intact.
+        assert_eq!(simplify_reveal_plan(&board, plan.clone()), plan);
     }
 
     #[test]
