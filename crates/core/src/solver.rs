@@ -457,17 +457,59 @@ fn search_reveals_deep(
     (None, nodes)
 }
 
-/// Strip no-op round trips from a deep reveal plan. The depth-first search can
-/// send a card out and bring it right back while doing unrelated work elsewhere;
-/// the whole-board `visited` dedup misses it, because the rest of the board
-/// changed in between, so the extracted line keeps the wasted motion. Here we
-/// look for pairs of mutually-inverse tableau moves and drop both whenever the
-/// shorter line still replays legally, respects the reversible cap, and reveals
-/// the same card — verified by replay, so correctness never rests on reasoning
-/// about how the moves in between interact. Repeats to a fixpoint, so a card
-/// bounced several times collapses fully.
+/// Strip wasted motion the depth-first deep search leaves in a reveal plan. Two
+/// kinds, both verified by replay so correctness never rests on reasoning about
+/// how the moves in between interact:
+///
+/// 1. **Contiguous collapse.** If a short run of moves ends at the same position
+///    it started (a wasted cycle), it drops out; if a *single* legal move
+///    reaches the run's end position, that move replaces the whole run. This
+///    folds a suited run that was split through a temp column and rejoined
+///    (`P→T`, `P→D`, `T→D`) back into one `P→D`. It only fires when the cards
+///    really form a movable run — an off-suit pair has no single-move equivalent,
+///    so `gen_moves` won't offer one and the split legitimately stays.
+/// 2. **Inverse-pair cancel.** A card sent out and brought back later, with
+///    unrelated work in between that the contiguous pass can't absorb: drop both
+///    moves.
+///
+/// Each accepted rewrite strictly shortens the plan, so this reaches a fixpoint.
 fn simplify_reveal_plan(start: &Board, mut plan: Vec<Move>) -> Vec<Move> {
+    // How far apart the ends of a collapsible contiguous block may be.
+    const WINDOW: usize = 6;
     'again: loop {
+        // boards[t] = the position after the first t moves of the plan.
+        let boards = prefix_boards(start, &plan);
+
+        for i in 0..plan.len() {
+            let end = plan.len().min(i + WINDOW);
+            let mut from_i: Vec<Move> = Vec::new();
+            let mut generated = false;
+            for j in (i + 1)..end {
+                let target = boards[j + 1].hash();
+                let candidate = if target == boards[i].hash() {
+                    // The block returns to where it began — a wasted cycle.
+                    Some(splice(&plan, i, j, None))
+                } else {
+                    if !generated {
+                        boards[i].gen_moves(&mut from_i);
+                        generated = true;
+                    }
+                    // A single move that reaches the block's end position replaces it.
+                    from_i.iter().copied().find_map(|m| {
+                        let mut b = boards[i].clone();
+                        b.make(m);
+                        (b.hash() == target).then(|| splice(&plan, i, j, Some(m)))
+                    })
+                };
+                if let Some(next) = candidate {
+                    if plan_reveals(start, &next) {
+                        plan = next;
+                        continue 'again;
+                    }
+                }
+            }
+        }
+
         for i in 0..plan.len() {
             let Move::Tableau { from: fi, to: ti, count: ci } = plan[i] else { continue };
             for j in (i + 1)..plan.len() {
@@ -476,47 +518,63 @@ fn simplify_reveal_plan(start: &Board, mut plan: Vec<Move>) -> Vec<Move> {
                 if !(fj == ti && tj == fi && cj == ci) {
                     continue;
                 }
-                let mut candidate = Vec::with_capacity(plan.len() - 2);
-                candidate.extend_from_slice(&plan[..i]);
-                candidate.extend_from_slice(&plan[i + 1..j]);
-                candidate.extend_from_slice(&plan[j + 1..]);
-                if plan_is_valid_reveal(start, &candidate) {
-                    plan = candidate;
+                let mut next = Vec::with_capacity(plan.len() - 2);
+                next.extend_from_slice(&plan[..i]);
+                next.extend_from_slice(&plan[i + 1..j]);
+                next.extend_from_slice(&plan[j + 1..]);
+                if plan_reveals(start, &next) {
+                    plan = next;
                     continue 'again;
                 }
             }
         }
+
         break;
     }
     plan
 }
 
-/// Whether `moves` is a sound reveal line from `start`: every move is legal, no
-/// more than `MAX_CONSEC_REVERSIBLE` reversible moves run consecutively (the same
-/// invariant the search guarantees), and the final board turns up an unknown
-/// card. Used to accept a candidate simplification only when it preserves all of
-/// these — in particular, cutting a pair that straddles a committal move can't
-/// smuggle in a longer wander.
-fn plan_is_valid_reveal(start: &Board, moves: &[Move]) -> bool {
+/// The position after each prefix of `moves`: `out[t]` is the board after the
+/// first `t` moves (`out[0]` is `start`).
+fn prefix_boards(start: &Board, moves: &[Move]) -> Vec<Board> {
+    let mut boards = Vec::with_capacity(moves.len() + 1);
+    let mut b = start.clone();
+    boards.push(b.clone());
+    for &m in moves {
+        b.make(m);
+        boards.push(b.clone());
+    }
+    boards
+}
+
+/// `plan` with moves `[i..=j]` replaced by `repl` (one move, or nothing).
+fn splice(plan: &[Move], i: usize, j: usize, repl: Option<Move>) -> Vec<Move> {
+    let mut out = Vec::with_capacity(plan.len());
+    out.extend_from_slice(&plan[..i]);
+    out.extend(repl);
+    out.extend_from_slice(&plan[j + 1..]);
+    out
+}
+
+/// Whether `moves` replays legally from `start` (every move comes from
+/// `gen_moves`) and the final board turns up an unknown card. This is the sole
+/// acceptance test for a simplification.
+///
+/// Note it deliberately does *not* re-impose the search's reversible-run cap:
+/// that cap keeps the *search* from wandering, but simplification only ever
+/// removes moves, so it can't introduce wandering — and collapsing a suited run
+/// that was split through a temp column may legitimately leave a slightly longer
+/// reversible run inside a strictly shorter plan, which is still an improvement.
+fn plan_reveals(start: &Board, moves: &[Move]) -> bool {
     let mut b = start.clone();
     let mut legal = Vec::new();
-    let mut run = 0u32;
     for &m in moves {
         legal.clear();
         b.gen_moves(&mut legal);
         if !legal.contains(&m) {
             return false;
         }
-        let before = progress_key(&b);
         b.make(m);
-        if is_committal(before, progress_key(&b)) {
-            run = 0;
-        } else {
-            run += 1;
-            if run > MAX_CONSEC_REVERSIBLE {
-                return false;
-            }
-        }
     }
     b.exposed_unknowns() > 0
 }
@@ -836,31 +894,46 @@ mod tests {
     }
 
     #[test]
-    fn advise_deep_finds_a_reveal_and_respects_the_cap() {
-        // The deep DFS must find a legal, revealing plan, and — like the BFS —
-        // never run more than MAX_CONSEC_REVERSIBLE reversible moves in a row.
+    fn advise_deep_finds_a_reveal() {
+        // The deep search must return a legal, reasonably-short plan that reveals
+        // exactly what it promises. (The reversible-run cap is a property of the
+        // raw search, checked separately — the simplifier that runs afterward may
+        // legitimately merge runs while making the plan strictly shorter.)
         let board = frozen_known_stock_board();
         let advice = Solver::advise_deep(&board, 25_000_000, 200);
 
         assert!(!advice.moves.is_empty(), "deep search should find a reveal");
         assert!(advice.uncovers >= 1);
-        // The cap ladder keeps the shortest line, so it stays reasonable — not
-        // the thousands-of-moves a single wandering pass can produce.
         assert!(advice.moves.len() <= 200, "deep plan too long: {}", advice.moves.len());
+        assert!(plan_reveals(&board, &advice.moves));
+
+        let mut end = board.clone();
+        for &m in &advice.moves {
+            end.make(m);
+        }
+        assert_eq!(end.exposed_unknowns(), advice.uncovers);
+    }
+
+    #[test]
+    fn deep_search_respects_the_reversible_cap() {
+        // The raw depth-first search (before simplification) must never run more
+        // than its `max_reversible` reversible moves in a row.
+        let board = frozen_known_stock_board();
+        let (found, _) = search_reveals_deep(&board, 25_000_000, 200, MAX_CONSEC_REVERSIBLE);
+        let moves = found.expect("deep search should find a reveal at the loosest cap");
 
         let mut end = board.clone();
         let mut run = 0u32;
-        for &m in &advice.moves {
+        for &m in &moves {
             let before = progress_key(&end);
             end.make(m);
             if is_committal(before, progress_key(&end)) {
                 run = 0;
             } else {
                 run += 1;
-                assert!(run <= MAX_CONSEC_REVERSIBLE, "deep plan wandered: {run} in a row");
+                assert!(run <= MAX_CONSEC_REVERSIBLE, "search wandered: {run} in a row");
             }
         }
-        assert_eq!(end.exposed_unknowns(), advice.uncovers);
     }
 
     #[test]
@@ -888,7 +961,7 @@ mod tests {
             Move::Tableau { from: 0, to: 1, count: 1 }, // 9h off -> reveal
         ];
         // The bounce line is itself a legal, revealing plan...
-        assert!(plan_is_valid_reveal(&board, &bounce));
+        assert!(plan_reveals(&board, &bounce));
         // ...but the round trip is redundant, so only the reveal survives.
         assert_eq!(
             simplify_reveal_plan(&board, bounce),
@@ -904,7 +977,7 @@ mod tests {
         let board = frozen_known_stock_board();
         let advice = Solver::advise_deep(&board, 25_000_000, 200);
         assert!(!advice.moves.is_empty());
-        assert!(plan_is_valid_reveal(&board, &advice.moves));
+        assert!(plan_reveals(&board, &advice.moves));
         assert_eq!(
             simplify_reveal_plan(&board, advice.moves.clone()),
             advice.moves,
@@ -913,34 +986,66 @@ mod tests {
     }
 
     #[test]
-    fn simplify_rejects_a_cut_that_would_break_a_later_move() {
-        // Moving 8h out to col 1 is what lets 7h land on it there — which is the
-        // move that reveals col 2. The 0->1 and later 1->0 look like an inverse
-        // pair, but cutting both would leave "7h -> col1" landing on a bare 9s
-        // (illegal), so the simplifier must decline and keep the reveal.
+    fn simplify_collapses_a_run_split_through_a_temp_column() {
+        // A suited pair (9h,8h) relocated to col 1 via a temp column in three
+        // moves collapses to the single 2-card move that does the same thing.
         let cols: Vec<(u8, Vec<Card>)> = vec![
-            (0, cards("8h")),    // 8h moves out to col 1...
-            (0, cards("9s")),    // ...onto 9s
-            (1, cards("? 7h")),  // 7h lands on 8h at col 1 => reveals col 2's hidden card
+            (1, cards("? 9h 8h")), // moving the 9h-8h run off flips the hidden card
+            (0, cards("10s")),     // the run lands here
+            (0, cards("")),        // an empty temp column
             (0, cards("2s")),
             (0, cards("3s")),
             (0, cards("4s")),
             (0, cards("5s")),
             (0, cards("6s")),
+            (0, cards("7s")),
             (0, cards("8s")),
-            (0, cards("9d")),
+        ];
+        let board = Board::from_parts(&cols, &[]).expect("valid board");
+        let split = vec![
+            Move::Tableau { from: 0, to: 2, count: 1 }, // 8h -> temp
+            Move::Tableau { from: 0, to: 1, count: 1 }, // 9h -> col1 (reveal)
+            Move::Tableau { from: 2, to: 1, count: 1 }, // 8h -> col1, rejoining 9h
+        ];
+        assert!(plan_reveals(&board, &split));
+        assert_eq!(
+            simplify_reveal_plan(&board, split),
+            vec![Move::Tableau { from: 0, to: 1, count: 2 }],
+        );
+    }
+
+    #[test]
+    fn simplify_cancels_an_interleaved_round_trip() {
+        // 8h is parked on col 1 and brought back later, with two unrelated
+        // reveals in between that the contiguous pass can't fold together. The
+        // inverse-pair cancel must still strip the bounce, leaving the reveals.
+        let cols: Vec<(u8, Vec<Card>)> = vec![
+            (0, cards("8h")),   // bounces to col1 and back — pure waste
+            (0, cards("9s")),   // ...parking on 9s
+            (1, cards("? 7d")), // reveal A: 7d -> col3
+            (0, cards("8c")),
+            (1, cards("? 6s")), // reveal B: 6s -> col5
+            (0, cards("7h")),
+            (0, cards("2s")),
+            (0, cards("3s")),
+            (0, cards("4s")),
+            (0, cards("5s")),
         ];
         let board = Board::from_parts(&cols, &[]).expect("valid board");
         let plan = vec![
-            Move::Tableau { from: 0, to: 1, count: 1 }, // 8h -> col1 (onto 9s)
-            Move::Tableau { from: 2, to: 1, count: 1 }, // 7h -> col1 (onto 8h) => reveal col2
-            Move::Tableau { from: 1, to: 0, count: 1 }, // 7h -> empty col0 (looks like 0->1's inverse)
+            Move::Tableau { from: 0, to: 1, count: 1 }, // 8h out (waste)
+            Move::Tableau { from: 2, to: 3, count: 1 }, // reveal A
+            Move::Tableau { from: 4, to: 5, count: 1 }, // reveal B
+            Move::Tableau { from: 1, to: 0, count: 1 }, // 8h back (waste)
         ];
-        // Sanity: it's a legal reveal as written.
-        assert!(plan_is_valid_reveal(&board, &plan));
-        // The only inverse-shaped pair (moves 1 and 3) can't be cut without
-        // breaking move 2, so the plan is left intact.
-        assert_eq!(simplify_reveal_plan(&board, plan.clone()), plan);
+        assert!(plan_reveals(&board, &plan));
+        assert_eq!(
+            simplify_reveal_plan(&board, plan),
+            vec![
+                Move::Tableau { from: 2, to: 3, count: 1 },
+                Move::Tableau { from: 4, to: 5, count: 1 },
+            ],
+        );
     }
 
     #[test]
