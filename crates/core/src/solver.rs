@@ -210,31 +210,38 @@ impl Solver {
     /// warn before using it. Returns an empty plan if nothing is found in budget.
     pub fn advise_deep(board: &Board, node_limit: u64, depth_limit: usize) -> Advice {
         let start_completed = board.completed;
-        let mut best: Option<Vec<Move>> = None;
-        let mut remaining = node_limit;
 
-        // A reveal this short is already fine for a "here's a deep line" warning;
-        // stop refining once we have one and don't burn budget chasing a few
-        // fewer moves.
-        const GOOD_ENOUGH: usize = 60;
-
-        for cap in [2u32, 3, 4, 5, 6, 8] {
-            if remaining == 0 || best.as_ref().is_some_and(|p| p.len() <= GOOD_ENOUGH) {
-                break;
-            }
-            // Only look for a line shorter than the best so far.
-            let depth = best.as_ref().map_or(depth_limit, |p| p.len().saturating_sub(1));
-            if depth == 0 {
-                break;
-            }
-            let (found, used) = search_reveals_deep(board, remaining, depth, cap);
-            remaining = remaining.saturating_sub(used);
-            if let Some(moves) = found {
-                if best.as_ref().map_or(true, |b| moves.len() < b.len()) {
-                    best = Some(moves);
+        // Primary: a best-first search heads straight for the shallowest buried
+        // unknown and returns a short line (typically a handful of moves per card
+        // it has to clear). Only if it comes up empty within budget do we fall
+        // back to the depth-first cap-ladder — which is strictly weaker (it caps
+        // consecutive reversible moves, so it explores a subset), but explores in
+        // a different order, giving a second chance when A* exhausts its budget.
+        let (astar, used) = search_reveals_astar(board, node_limit, REVEAL_ASTAR_WEIGHT);
+        let best = astar.or_else(|| {
+            let mut remaining = node_limit.saturating_sub(used);
+            let mut best: Option<Vec<Move>> = None;
+            // A reveal this short is already fine for the "here's a deep line"
+            // warning; don't burn budget chasing a few fewer moves.
+            const GOOD_ENOUGH: usize = 60;
+            for cap in [2u32, 3, 4, 5, 6, 8] {
+                if remaining == 0 || best.as_ref().is_some_and(|p| p.len() <= GOOD_ENOUGH) {
+                    break;
+                }
+                let depth = best.as_ref().map_or(depth_limit, |p| p.len().saturating_sub(1));
+                if depth == 0 {
+                    break;
+                }
+                let (found, u) = search_reveals_deep(board, remaining, depth, cap);
+                remaining = remaining.saturating_sub(u);
+                if let Some(moves) = found {
+                    if best.as_ref().map_or(true, |b| moves.len() < b.len()) {
+                        best = Some(moves);
+                    }
                 }
             }
-        }
+            best
+        });
 
         match best {
             Some(moves) => {
@@ -502,6 +509,88 @@ fn search_reveals_deep(
         }
     }
 
+    (None, nodes)
+}
+
+/// Base cost of one move in the best-first reveal search, and the extra charged
+/// for a move that splits a same-suit run. The penalty is *soft* — smaller than
+/// a move — so the search avoids gratuitous suit-breaking but still breaks a run
+/// when doing so reaches the reveal in fewer moves overall (the "shortening a
+/// stack for a later purpose" case). Both are scaled up from 1 so the penalty
+/// can be a fraction of a move without needing floats.
+const REVEAL_MOVE_COST: u32 = 4;
+const SUIT_BREAK_COST: u32 = 1;
+
+/// Heuristic weight for the best-first reveal search (`g + w*h`). Matches the
+/// main solver's default: `1` is near-optimal but explores more; `2` trades a
+/// move or two for markedly fewer nodes and holds up on hard, deeply-buried
+/// positions.
+const REVEAL_ASTAR_WEIGHT: u32 = 2;
+
+/// Distance-to-a-reveal estimate: the fewest cards covering any hidden unknown,
+/// in move-cost units. A lower bound-ish guide (each covering card needs at
+/// least one move to clear), used to steer the best-first search.
+fn reveal_h(b: &Board) -> u32 {
+    let min_cover = (0..COLS).filter_map(|c| cover_over_unknown(b, c)).min().unwrap_or(0);
+    min_cover as u32 * REVEAL_MOVE_COST
+}
+
+/// Cost of `m` in the reveal search: a base per move, plus the suit-break penalty
+/// when the move separates a same-suit run at its source.
+fn reveal_move_cost(b: &Board, m: Move) -> u32 {
+    let Move::Tableau { from, count, .. } = m else { return REVEAL_MOVE_COST + 2 }; // deals bury
+    let (f, k) = (from as usize, count as usize);
+    let col = &b.cols[f];
+    let n = col.len();
+    if n > k {
+        let left = col[n - k - 1]; // card left on top of the source after the move
+        let moved_bottom = col[n - k];
+        if !is_unknown(left) && suit(left) == suit(moved_bottom) && rank(left) == rank(moved_bottom) + 1 {
+            return REVEAL_MOVE_COST + SUIT_BREAK_COST; // splitting a same-suit run
+        }
+    }
+    REVEAL_MOVE_COST
+}
+
+/// Best-first (weighted-A*) search for a *short* line that reveals an unknown.
+/// Ordered by `g + weight*h`, where `g` is accumulated move cost (with the
+/// suit-break penalty) and `h` is `reveal_h`. Unlike the depth-first `search_
+/// reveals_deep`, it heads straight for the shallowest buried unknown and returns
+/// a far shorter line, without a reversible-run cap (churn just costs `g`, so
+/// it's naturally deprioritized). Same memory-lean node arena as `astar_short`.
+fn search_reveals_astar(start: &Board, node_limit: u64, weight: u32) -> (Option<Vec<Move>>, u64) {
+    let mut arena: Vec<Node> = vec![Node { parent: u32::MAX, mv: Move::Deal }];
+    let mut closed: HashSet<u64> = HashSet::new();
+    let mut open: BinaryHeap<(Reverse<u32>, u32, u32)> = BinaryHeap::new();
+
+    closed.insert(start.hash());
+    open.push((Reverse(weight * reveal_h(start)), 0, 0));
+    let mut nodes: u64 = 0;
+
+    while let Some((_pri, g, idx)) = open.pop() {
+        let mut board = board_at(start, &arena, idx);
+        let mut moves = Vec::new();
+        board.gen_moves(&mut moves);
+        for m in moves {
+            nodes += 1;
+            if nodes > node_limit {
+                return (None, nodes);
+            }
+            let cost = reveal_move_cost(&board, m);
+            let undo = board.make(m);
+            if board.exposed_unknowns() > 0 {
+                return (Some(reconstruct(&arena, idx, m)), nodes);
+            }
+            if closed.insert(board.hash()) {
+                let ng = g + cost;
+                let pri = ng + weight * reveal_h(&board);
+                let ci = arena.len() as u32;
+                arena.push(Node { parent: idx, mv: m });
+                open.push((Reverse(pri), ng, ci));
+            }
+            board.undo(&undo);
+        }
+    }
     (None, nodes)
 }
 
@@ -1015,6 +1104,36 @@ mod tests {
             simplify_reveal_plan(&board, bounce),
             vec![Move::Tableau { from: 0, to: 1, count: 1 }],
         );
+    }
+
+    #[test]
+    fn astar_reveal_finds_a_short_line() {
+        // The best-first reveal search should return a short, legal, revealing
+        // line — far shorter than the depth-first search's wandering. On this
+        // frozen board it finds a single-digit-move reveal in a few thousand nodes.
+        let board = frozen_known_stock_board();
+        let (found, _) = search_reveals_astar(&board, 25_000_000, REVEAL_ASTAR_WEIGHT);
+        let moves = found.expect("best-first search should find a reveal");
+        assert!(moves.len() <= 20, "expected a short line, got {}", moves.len());
+        assert!(plan_reveals(&board, &moves));
+    }
+
+    #[test]
+    fn reveal_move_cost_penalizes_splitting_a_suited_run() {
+        // Moving 8h off a 9h-8h run (col 0) splits a suit and costs extra; moving
+        // 8h off an unrelated card (col 1) does not.
+        let cols: Vec<(u8, Vec<Card>)> = vec![
+            (0, cards("9h 8h")),  // 8h sits on same-suit 9h -> splitting it is penalized
+            (0, cards("2s 8h")),  // 8h sits on unrelated 2s -> no penalty
+            (0, cards("10s")), (0, cards("10c")),
+            (0, cards("3s")), (0, cards("4s")), (0, cards("5s")),
+            (0, cards("6s")), (0, cards("7s")), (0, cards("Jh")),
+        ];
+        let board = Board::from_parts(&cols, &[]).expect("valid");
+        let split = Move::Tableau { from: 0, to: 2, count: 1 }; // 8h off the 9h-8h run
+        let clean = Move::Tableau { from: 1, to: 3, count: 1 }; // 8h off an unrelated card
+        assert_eq!(reveal_move_cost(&board, split), REVEAL_MOVE_COST + SUIT_BREAK_COST);
+        assert_eq!(reveal_move_cost(&board, clean), REVEAL_MOVE_COST);
     }
 
     #[test]
