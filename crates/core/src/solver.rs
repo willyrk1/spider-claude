@@ -372,12 +372,60 @@ fn search_reveals(start_board: &Board, node_limit: u64, allow_deals: bool) -> Op
     })
 }
 
+/// Cards sitting above the shallowest still-hidden unknown in column `c` — how
+/// many must be cleared before it flips face-up. `None` if `c` hides no unknown.
+fn cover_over_unknown(b: &Board, c: usize) -> Option<usize> {
+    let col = &b.cols[c];
+    let fd = b.face_down[c] as usize;
+    (0..fd).rev().find(|&i| is_unknown(col[i])).map(|u| col.len() - 1 - u)
+}
+
+/// The unknown-hiding column that's easiest to break into (fewest cards on top
+/// of its shallowest unknown) — the reveal search's dig target.
+fn easiest_unknown_column(b: &Board) -> Option<usize> {
+    (0..COLS)
+        .filter_map(|c| cover_over_unknown(b, c).map(|cov| (cov, c)))
+        .min()
+        .map(|(_, c)| c)
+}
+
+/// Ordering score for a move in the deep reveal search (higher is tried first).
+/// A depth-first search commits to whatever it explores first, so — unguided —
+/// it wanders and blows its budget before reaching a deeply buried unknown. This
+/// steers it: dig the easiest target column, favor moves that flip a face-down
+/// card, and never pile back onto the target.
+fn reveal_move_rank(b: &Board, target: Option<usize>, m: Move) -> i32 {
+    let Move::Tableau { from, to, count } = m else { return -1 }; // deals bury; try last
+    let (f, t, k) = (from as usize, to as usize, count as usize);
+    let mut score = 0;
+    if Some(f) == target {
+        score += 3; // clearing cover off the easiest unknown
+    }
+    let fd = b.face_down[f] as usize;
+    if fd > 0 && b.cols[f].len().checked_sub(k) == Some(fd) {
+        score += 2; // this move flips a face-down card up
+    }
+    if Some(t) == target {
+        score -= 4; // burying the target again — worst
+    }
+    score
+}
+
+/// Legal moves, ordered best-first for the reveal search (see `reveal_move_rank`).
+fn gen_moves_toward_reveal(b: &Board, out: &mut Vec<Move>) {
+    b.gen_moves(out);
+    let target = easiest_unknown_column(b);
+    // Stable sort keeps `gen_moves`' order among moves of equal rank.
+    out.sort_by_key(|&m| Reverse(reveal_move_rank(b, target, m)));
+}
+
 /// One depth-first pass: find the first line (up to `depth_limit` moves, at most
 /// `max_reversible` reversible moves in a row) that reveals a card. Same deal
 /// handling as `search_reveals`, but DFS reaches reveals a breadth-first search
-/// can't afford. Explores each board once (`visited`), so it always terminates.
-/// Returns the plan (if any) and how many nodes it spent, so the caller can run
-/// several passes against a shared budget.
+/// can't afford, and moves are ordered to dig toward the buried unknowns rather
+/// than wander (see `gen_moves_toward_reveal`). Explores each board once
+/// (`visited`), so it always terminates. Returns the plan (if any) and how many
+/// nodes it spent, so the caller can run several passes against a shared budget.
 fn search_reveals_deep(
     start_board: &Board,
     node_limit: u64,
@@ -405,7 +453,7 @@ fn search_reveals_deep(
     let mut stack: Vec<Frame> = Vec::new();
     {
         let mut mv = Vec::new();
-        b.gen_moves(&mut mv);
+        gen_moves_toward_reveal(&b, &mut mv);
         stack.push(Frame { moves: mv, idx: 0, undo: None, via: None, run: 0 });
     }
     let mut nodes: u64 = 0;
@@ -446,7 +494,7 @@ fn search_reveals_deep(
         // past unseen cards), or we've been here before.
         if !terminal_deal && stack.len() < depth_limit && visited.insert(b.hash()) {
             let mut mv = Vec::new();
-            b.gen_moves(&mut mv);
+            gen_moves_toward_reveal(&b, &mut mv);
             let nc = if committal { 0 } else { run + 1 };
             stack.push(Frame { moves: mv, idx: 0, undo: Some(undo), via: Some(m), run: nc });
         } else {
@@ -967,6 +1015,56 @@ mod tests {
             simplify_reveal_plan(&board, bounce),
             vec![Move::Tableau { from: 0, to: 1, count: 1 }],
         );
+    }
+
+    #[test]
+    fn reveal_search_orders_digging_before_burying() {
+        // With an unknown buried under 9h in col 0, the ordered move list must put
+        // the move that clears col 0 (9h -> col 1) ahead of one that piles onto it
+        // (8h -> col 0). This ordering is what steers the deep DFS to the needle.
+        let cols: Vec<(u8, Vec<Card>)> = vec![
+            (1, cards("? 9h")),  // col 0: unknown buried under 9h -> the dig target
+            (0, cards("10s")),   // 9h can move here (clears col 0)
+            (0, cards("8h")),    // 8h can move onto 9h (buries col 0 deeper)
+            (0, cards("2s")), (0, cards("3s")), (0, cards("4s")),
+            (0, cards("5s")), (0, cards("6s")), (0, cards("7s")), (0, cards("Ah")),
+        ];
+        let board = Board::from_parts(&cols, &[]).expect("valid");
+        assert_eq!(easiest_unknown_column(&board), Some(0));
+
+        let mut mv = Vec::new();
+        gen_moves_toward_reveal(&board, &mut mv);
+        let dig = mv.iter().position(|m| matches!(m, Move::Tableau { from: 0, to: 1, .. }));
+        let bury = mv.iter().position(|m| matches!(m, Move::Tableau { from: 2, to: 0, .. }));
+        assert!(
+            dig < bury,
+            "digging col 0 ({dig:?}) should be ordered before burying it ({bury:?})",
+        );
+    }
+
+    #[test]
+    #[ignore = "slow (~minute); regression for the deeply-buried-unknown false negative"]
+    fn advise_deep_digs_out_a_deeply_buried_unknown() {
+        // A real reported position (URL2): all stock dealt, the 3 unknowns pinned
+        // at the bottom of a 13-card column. Unguided, the deep search burned its
+        // 25M-node budget and returned "stuck" though a reveal exists; guided move
+        // ordering must now find one within the default budget.
+        let cols: Vec<(u8, Vec<Card>)> = vec![
+            (3, cards("9c 7d Js As 5h Kd Qs 7h 6h Qh")),
+            (4, cards("5c 2h 4h Kc Ac Kh Qh Jh Qc")),
+            (4, cards("? ? ? Ks Ks 8s 7s 6c Qc Jd 10d 9c 8c")),
+            (5, cards("3s Jc Ah Jh 8s Qs Jd Ac 10c 9h 8c 3d 2h Ah")),
+            (1, cards("10c Jc")),
+            (3, cards("9s As Kc 6s 8h 2s 9d 8d")),
+            (3, cards("7s 10s 5h Kh Kd 3d 4h 3h 2c 6c 9h")),
+            (3, cards("6s 10h 10d 10s 9d 8d Qd Js 10h 5d 4d 6d 3c 2d Ad")),
+            (0, cards("3h")),
+            (4, cards("2c 7c Qd 7h 7d 6d 5c 4c 3c 2d Ad 4c 5s 4s 4d 7c 6h 5d 4s 3s 2s")),
+        ];
+        let board = Board::from_parts(&cols, &[]).expect("valid");
+        let advice = Solver::advise_deep(&board, 25_000_000, 200);
+        assert!(advice.uncovers >= 1, "deep search should dig out a buried unknown");
+        assert!(plan_reveals(&board, &advice.moves));
     }
 
     #[test]
