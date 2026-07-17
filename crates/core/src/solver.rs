@@ -512,14 +512,21 @@ fn search_reveals_deep(
     (None, nodes)
 }
 
-/// Base cost of one move in the best-first reveal search, and the extra charged
-/// for a move that splits a same-suit run. The penalty is *soft* — smaller than
-/// a move — so the search avoids gratuitous suit-breaking but still breaks a run
-/// when doing so reaches the reveal in fewer moves overall (the "shortening a
-/// stack for a later purpose" case). Both are scaled up from 1 so the penalty
-/// can be a fraction of a move without needing floats.
+/// Move costs for the best-first reveal search, scaled up from 1 so the suit
+/// adjustments can be a fraction of a move without needing floats.
+///
+/// Splitting a same-suit run costs a little extra; landing a run back onto its
+/// own suit earns the same amount back. The two cancel, which is the point:
+/// breaking a run to shuffle a large partially-broken sequence (typically
+/// parking pieces via an empty column) and rejoining it right after is a normal,
+/// often *necessary* maneuver — real winning games are full of them — so it
+/// should be priced the same as not having split at all. Only a split that never
+/// gets put back stays penalized. Decomposing a sequence at its *suit
+/// boundaries* (the classic supermove) was never penalized to begin with: those
+/// neighbours are different suits, so no run is being split.
 const REVEAL_MOVE_COST: u32 = 4;
 const SUIT_BREAK_COST: u32 = 1;
+const SUIT_JOIN_CREDIT: u32 = 1;
 
 /// Heuristic weight for the best-first reveal search (`g + w*h`). Matches the
 /// main solver's default: `1` is near-optimal but explores more; `2` trades a
@@ -535,21 +542,36 @@ fn reveal_h(b: &Board) -> u32 {
     min_cover as u32 * REVEAL_MOVE_COST
 }
 
-/// Cost of `m` in the reveal search: a base per move, plus the suit-break penalty
-/// when the move separates a same-suit run at its source.
+/// Cost of `m` in the reveal search: a base per move, plus `SUIT_BREAK_COST` if
+/// it splits a same-suit run at the source, minus `SUIT_JOIN_CREDIT` if it lands
+/// the moved run back onto its own suit. Split-then-rejoin therefore nets out to
+/// plain move cost; an abandoned split does not. Stays strictly positive, so the
+/// best-first search's ordering remains sound.
 fn reveal_move_cost(b: &Board, m: Move) -> u32 {
-    let Move::Tableau { from, count, .. } = m else { return REVEAL_MOVE_COST + 2 }; // deals bury
-    let (f, k) = (from as usize, count as usize);
+    let Move::Tableau { from, to, count } = m else { return REVEAL_MOVE_COST + 2 }; // deals bury
+    let (f, t, k) = (from as usize, to as usize, count as usize);
     let col = &b.cols[f];
     let n = col.len();
+    if n == 0 || k > n {
+        return REVEAL_MOVE_COST;
+    }
+    let moved_bottom = col[n - k];
+    let mut cost = REVEAL_MOVE_COST;
+
+    // Splitting a same-suit run: the card left behind continues the run we took.
     if n > k {
-        let left = col[n - k - 1]; // card left on top of the source after the move
-        let moved_bottom = col[n - k];
+        let left = col[n - k - 1];
         if !is_unknown(left) && suit(left) == suit(moved_bottom) && rank(left) == rank(moved_bottom) + 1 {
-            return REVEAL_MOVE_COST + SUIT_BREAK_COST; // splitting a same-suit run
+            cost += SUIT_BREAK_COST;
         }
     }
-    REVEAL_MOVE_COST
+    // Rejoining one: the run lands on its own suit, one rank up.
+    if let Some(&top) = b.cols[t].last() {
+        if !is_unknown(top) && suit(top) == suit(moved_bottom) && rank(top) == rank(moved_bottom) + 1 {
+            cost -= SUIT_JOIN_CREDIT;
+        }
+    }
+    cost
 }
 
 /// Best-first (weighted-A*) search for a *short* line that reveals an unknown.
@@ -1119,21 +1141,63 @@ mod tests {
     }
 
     #[test]
-    fn reveal_move_cost_penalizes_splitting_a_suited_run() {
-        // Moving 8h off a 9h-8h run (col 0) splits a suit and costs extra; moving
-        // 8h off an unrelated card (col 1) does not.
+    fn reveal_move_cost_prices_suit_breaks_and_rejoins() {
         let cols: Vec<(u8, Vec<Card>)> = vec![
-            (0, cards("9h 8h")),  // 8h sits on same-suit 9h -> splitting it is penalized
-            (0, cards("2s 8h")),  // 8h sits on unrelated 2s -> no penalty
-            (0, cards("10s")), (0, cards("10c")),
+            (0, cards("9h 8h")), // col 0: 8h on its own suit -> moving it splits the run
+            (0, cards("2s 8h")), // col 1: 8h on an unrelated card -> no split
+            (0, cards("9s")),    // col 2: off-suit landing spot for an 8
+            (0, cards("9h")),    // col 3: same-suit landing spot -> rejoins the run
             (0, cards("3s")), (0, cards("4s")), (0, cards("5s")),
             (0, cards("6s")), (0, cards("7s")), (0, cards("Jh")),
         ];
-        let board = Board::from_parts(&cols, &[]).expect("valid");
-        let split = Move::Tableau { from: 0, to: 2, count: 1 }; // 8h off the 9h-8h run
-        let clean = Move::Tableau { from: 1, to: 3, count: 1 }; // 8h off an unrelated card
-        assert_eq!(reveal_move_cost(&board, split), REVEAL_MOVE_COST + SUIT_BREAK_COST);
-        assert_eq!(reveal_move_cost(&board, clean), REVEAL_MOVE_COST);
+        let b = Board::from_parts(&cols, &[]).expect("valid");
+        // Splits a run, lands off-suit: penalized.
+        let split = Move::Tableau { from: 0, to: 2, count: 1 };
+        assert_eq!(reveal_move_cost(&b, split), REVEAL_MOVE_COST + SUIT_BREAK_COST);
+        // Splits nothing, lands off-suit: plain.
+        let plain = Move::Tableau { from: 1, to: 2, count: 1 };
+        assert_eq!(reveal_move_cost(&b, plain), REVEAL_MOVE_COST);
+        // Splits nothing, lands back on its own suit: credited.
+        let join = Move::Tableau { from: 1, to: 3, count: 1 };
+        assert_eq!(reveal_move_cost(&b, join), REVEAL_MOVE_COST - SUIT_JOIN_CREDIT);
+        // Splits one run to complete another: the two cancel.
+        let swap = Move::Tableau { from: 0, to: 3, count: 1 };
+        assert_eq!(reveal_move_cost(&b, swap), REVEAL_MOVE_COST);
+    }
+
+    #[test]
+    fn suit_break_then_rejoin_costs_no_more_than_two_plain_moves() {
+        // Breaking a run to shuffle a sequence and putting it back right after is
+        // a normal, often necessary maneuver — so the split's penalty and the
+        // rejoin's credit must cancel, pricing the pair like two ordinary moves.
+        let before: Vec<(u8, Vec<Card>)> = vec![
+            (0, cards("9h 8h")), // 8h on its own suit
+            (0, cards("9s")),    // park it here (off-suit) — that's the split
+            (0, cards("2s")), (0, cards("3s")), (0, cards("4s")),
+            (0, cards("5s")), (0, cards("6s")), (0, cards("7s")),
+            (0, cards("10c")), (0, cards("Jd")),
+        ];
+        let b0 = Board::from_parts(&before, &[]).expect("valid");
+        let split = Move::Tableau { from: 0, to: 1, count: 1 };
+
+        // The same position once 8h is parked on 9s.
+        let after: Vec<(u8, Vec<Card>)> = vec![
+            (0, cards("9h")),
+            (0, cards("9s 8h")),
+            (0, cards("2s")), (0, cards("3s")), (0, cards("4s")),
+            (0, cards("5s")), (0, cards("6s")), (0, cards("7s")),
+            (0, cards("10c")), (0, cards("Jd")),
+        ];
+        let b1 = Board::from_parts(&after, &[]).expect("valid");
+        let rejoin = Move::Tableau { from: 1, to: 0, count: 1 }; // 8h back onto 9h
+
+        assert_eq!(reveal_move_cost(&b0, split), REVEAL_MOVE_COST + SUIT_BREAK_COST);
+        assert_eq!(reveal_move_cost(&b1, rejoin), REVEAL_MOVE_COST - SUIT_JOIN_CREDIT);
+        assert_eq!(
+            reveal_move_cost(&b0, split) + reveal_move_cost(&b1, rejoin),
+            2 * REVEAL_MOVE_COST,
+            "split + rejoin should cost the same as two plain moves",
+        );
     }
 
     #[test]
