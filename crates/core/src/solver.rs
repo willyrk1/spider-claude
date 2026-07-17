@@ -17,7 +17,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 
 use crate::board::{Board, Move, Undo, COLS};
@@ -76,10 +76,12 @@ impl Solver {
     /// Single-configuration search: weighted-A* primary, DFS fallback.
     pub fn solve(board: &Board, node_limit: u64, weight: u32, fd_weight: u32) -> SolveResult {
         let never = AtomicBool::new(false);
+        let progress = AtomicU64::new(0);
         let mut nodes: u64 = 0;
 
         // Primary: weighted-A* for a short solution (and best shot at hard deals).
-        let (astar, converged) = astar_short(board, node_limit, &mut nodes, weight, fd_weight, &never);
+        let (astar, converged) =
+            astar_short(board, node_limit, &mut nodes, weight, fd_weight, &never, &progress);
         if let Some(p) = astar {
             return SolveResult {
                 moves: Some(p), nodes, hit_limit: false, converged,
@@ -110,16 +112,52 @@ impl Solver {
     /// back to a single-threaded DFS only if every config comes up empty.
     pub fn solve_portfolio(board: &Board, node_limit: u64, configs: &[(u32, u32)]) -> SolveResult {
         let stop = Arc::new(AtomicBool::new(false));
-        let (tx, rx) = mpsc::channel();
+        let progress = Arc::new(AtomicU64::new(0));
+        let result = Self::solve_portfolio_tracked(board, node_limit, configs, &stop, &progress);
+        if result.moves.is_some() {
+            return result;
+        }
 
+        // No config solved it (and no cancel): last-resort DFS for *any* solution.
+        let mut dfs_nodes: u64 = 0;
+        let fallback = dfs_first(board, node_limit, &mut dfs_nodes);
+        let total_nodes = result.nodes + dfs_nodes;
+        match fallback {
+            Some(p) => SolveResult {
+                moves: Some(p), nodes: total_nodes, hit_limit: false, converged: false,
+                from_fallback: true, winning_config: None,
+            },
+            None => SolveResult {
+                moves: None, nodes: total_nodes, hit_limit: true, converged: false,
+                from_fallback: false, winning_config: None,
+            },
+        }
+    }
+
+    /// The A* portfolio, driven by a caller-owned `stop` flag (set it to cancel
+    /// mid-search) and publishing a running node total to `progress` (for a UI
+    /// to poll). No DFS fallback — this is for the long, cancellable solve, where
+    /// the fallback's long, ugly lines aren't wanted; the `solve_portfolio`
+    /// wrapper adds the fallback for the synchronous path. Returns unsolved
+    /// (`moves: None`) if every config is exhausted or the search is cancelled.
+    pub fn solve_portfolio_tracked(
+        board: &Board,
+        node_limit: u64,
+        configs: &[(u32, u32)],
+        stop: &Arc<AtomicBool>,
+        progress: &Arc<AtomicU64>,
+    ) -> SolveResult {
+        let (tx, rx) = mpsc::channel();
         let mut handles = Vec::with_capacity(configs.len());
         for &(w, fdw) in configs {
             let board = board.clone();
-            let stop = Arc::clone(&stop);
+            let stop = Arc::clone(stop);
+            let progress = Arc::clone(progress);
             let tx = tx.clone();
             handles.push(std::thread::spawn(move || {
                 let mut nodes: u64 = 0;
-                let (res, converged) = astar_short(&board, node_limit, &mut nodes, w, fdw, &stop);
+                let (res, converged) =
+                    astar_short(&board, node_limit, &mut nodes, w, fdw, &stop, &progress);
                 // Ignore send errors: the receiver may already have a winner.
                 let _ = tx.send(((w, fdw), res, converged, nodes));
             }));
@@ -142,25 +180,14 @@ impl Solver {
             let _ = h.join();
         }
 
-        if let Some((config, p, converged)) = winner {
-            return SolveResult {
+        match winner {
+            Some((config, p, converged)) => SolveResult {
                 moves: Some(p), nodes: total_nodes, hit_limit: false, converged,
                 from_fallback: false, winning_config: Some(config),
-            };
-        }
-
-        // No config solved it: last-resort DFS for *any* solution.
-        let mut dfs_nodes: u64 = 0;
-        let fallback = dfs_first(board, node_limit, &mut dfs_nodes);
-        total_nodes += dfs_nodes;
-        match fallback {
-            Some(p) => SolveResult {
-                moves: Some(p), nodes: total_nodes, hit_limit: false, converged: false,
-                from_fallback: true, winning_config: None,
             },
             None => SolveResult {
-                moves: None, nodes: total_nodes, hit_limit: true, converged: false,
-                from_fallback: false, winning_config: None,
+                moves: None, nodes: total_nodes, hit_limit: !stop.load(Ordering::Relaxed),
+                converged: false, from_fallback: false, winning_config: None,
             },
         }
     }
@@ -846,6 +873,7 @@ fn astar_short(
     w: u32,
     fdw: u32,
     stop: &AtomicBool,
+    progress: &AtomicU64,
 ) -> (Option<Vec<Move>>, bool) {
     let mut arena: Vec<Node> = vec![Node { parent: u32::MAX, mv: Move::Deal }];
     let mut closed: HashSet<u64> = HashSet::new();
@@ -867,6 +895,11 @@ fn astar_short(
 
         for m in moves {
             *nodes += 1;
+            // Publish progress in coarse batches (one atomic per 65536 nodes) so
+            // a poller can watch the search churn without contending the counter.
+            if *nodes & 0xFFFF == 0 {
+                progress.fetch_add(0x10000, Ordering::Relaxed);
+            }
             if *nodes > node_limit {
                 return (None, false);
             }

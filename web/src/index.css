@@ -105,6 +105,16 @@ button.big { padding: 11px 14px; font-size: 15px; }
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* Solving (background job) */
+.solving-head { display: flex; align-items: center; gap: 8px; }
+.solve-progress { font-variant-numeric: tabular-nums; font-size: 13px; margin-top: 4px; }
+.spinner {
+  width: 14px; height: 14px; flex: 0 0 14px; border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.25); border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* Plan (reveal or solution) */
 .plan { display: flex; flex-direction: column; gap: 8px; }
 .plan-actions { display: flex; gap: 8px; margin-top: 8px; }

@@ -12,20 +12,36 @@
 //! The solver is synchronous and CPU-heavy (it spawns its own worker threads),
 //! so each request runs on a blocking task to keep the async runtime responsive.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use axum::extract::{Path, State};
 use axum::{http::StatusCode, routing::get, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 
 use spider_core::board::{Board, Move};
 use spider_core::card::{make_card, rank, suit, Card, UNKNOWN};
-use spider_core::solver::{self, Advice, Solver};
+use spider_core::solver::{self, Advice, SolveResult, Solver};
 
 #[tokio::main]
 async fn main() {
+    let state = AppState {
+        jobs: Arc::new(Mutex::new(HashMap::new())),
+        next_id: Arc::new(AtomicU64::new(1)),
+    };
+    spawn_reaper(Arc::clone(&state.jobs));
+
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/solve", post(solve))
         .route("/advise", post(advise))
-        .route("/plan", post(plan));
+        .route("/plan", post(plan))
+        // Long, cancellable solve as a background job the UI polls.
+        .route("/solve/jobs", post(solve_job_start))
+        .route("/solve/jobs/:id", get(solve_job_poll).delete(solve_job_cancel))
+        .with_state(state);
 
     let addr = "127.0.0.1:3000";
     let listener = tokio::net::TcpListener::bind(addr)
@@ -33,6 +49,217 @@ async fn main() {
         .expect("bind address");
     println!("spider-api listening on http://{addr}");
     axum::serve(listener, app).await.expect("serve");
+}
+
+// ---- Background solve jobs (poll + heartbeat) ----
+//
+// A full solve can run for minutes on a hard deal, and proving a deal
+// *unsolvable* is effectively impossible (the reachable state space can't be
+// enumerated), so we never wait for that. Instead the UI starts a job, polls it,
+// and can cancel; each poll renews a lease, and a reaper cancels any job the UI
+// stopped polling (a closed tab) so abandoned searches don't hog the CPU.
+
+/// A search can't grow its closed set forever without OOMing the server, so even
+/// "until cancelled" gets a generous hard ceiling per config (empirically safe
+/// on commodity RAM; a hard deal reaches this in a handful of minutes).
+const SOLVE_JOB_NODES: u64 = 300_000_000;
+/// Cancel a job the UI hasn't polled within this long.
+const JOB_LEASE: Duration = Duration::from_secs(15);
+/// Keep a finished/cancelled job around this long so a final poll can read it.
+const JOB_RETAIN: Duration = Duration::from_secs(60);
+
+struct Job {
+    stop: Arc<AtomicBool>,
+    progress: Arc<AtomicU64>, // running node total, for the poller
+    started: Instant,
+    last_seen: Mutex<Instant>,       // renewed on each poll (the heartbeat)
+    finished: Mutex<Option<Instant>>, // set when done or cancelled
+    result: Mutex<Option<PlanResponse>>,
+    cancelled: AtomicBool,
+}
+
+#[derive(Clone)]
+struct AppState {
+    jobs: Arc<Mutex<HashMap<u64, Arc<Job>>>>,
+    next_id: Arc<AtomicU64>,
+}
+
+#[derive(Serialize)]
+struct JobStarted {
+    job_id: u64,
+}
+
+#[derive(Serialize)]
+struct JobStatus {
+    /// "running", "done", or "cancelled".
+    status: &'static str,
+    nodes: u64,
+    elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<PlanResponse>,
+}
+
+async fn solve_job_start(
+    State(state): State<AppState>,
+    Json(req): Json<PlanRequest>,
+) -> Result<Json<JobStarted>, (StatusCode, String)> {
+    let board = board_from_plan(&req)?;
+    if board.has_unknowns() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "board still has unknown cards — fill them in before solving".into(),
+        ));
+    }
+
+    let job = Arc::new(Job {
+        stop: Arc::new(AtomicBool::new(false)),
+        progress: Arc::new(AtomicU64::new(0)),
+        started: Instant::now(),
+        last_seen: Mutex::new(Instant::now()),
+        finished: Mutex::new(None),
+        result: Mutex::new(None),
+        cancelled: AtomicBool::new(false),
+    });
+    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    state.jobs.lock().unwrap().insert(id, Arc::clone(&job));
+
+    // The solve is blocking and spawns its own worker threads, so give it its
+    // own OS thread rather than a runtime task.
+    std::thread::spawn(move || {
+        let result = Solver::solve_portfolio_tracked(
+            &board,
+            SOLVE_JOB_NODES,
+            solver::DEFAULT_PORTFOLIO,
+            &job.stop,
+            &job.progress,
+        );
+        *job.result.lock().unwrap() = Some(solve_response(&board, result));
+        *job.finished.lock().unwrap() = Some(Instant::now());
+    });
+
+    Ok(Json(JobStarted { job_id: id }))
+}
+
+async fn solve_job_poll(
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+) -> Result<Json<JobStatus>, StatusCode> {
+    let job = state.jobs.lock().unwrap().get(&id).cloned();
+    let Some(job) = job else { return Err(StatusCode::NOT_FOUND) };
+    *job.last_seen.lock().unwrap() = Instant::now(); // heartbeat
+
+    let nodes = job.progress.load(Ordering::Relaxed);
+    let elapsed_ms = job.started.elapsed().as_millis() as u64;
+    let (status, result) = if job.cancelled.load(Ordering::Relaxed) {
+        ("cancelled", None)
+    } else if let Some(r) = job.result.lock().unwrap().clone() {
+        ("done", Some(r))
+    } else {
+        ("running", None)
+    };
+    Ok(Json(JobStatus { status, nodes, elapsed_ms, result }))
+}
+
+async fn solve_job_cancel(State(state): State<AppState>, Path(id): Path<u64>) -> StatusCode {
+    match state.jobs.lock().unwrap().get(&id).cloned() {
+        Some(job) => {
+            job.cancelled.store(true, Ordering::Relaxed);
+            job.stop.store(true, Ordering::Relaxed);
+            let mut fin = job.finished.lock().unwrap();
+            if fin.is_none() {
+                *fin = Some(Instant::now());
+            }
+            StatusCode::OK
+        }
+        None => StatusCode::NOT_FOUND,
+    }
+}
+
+/// Periodically cancel jobs whose UI stopped polling, and drop long-finished
+/// ones so the map doesn't grow without bound.
+fn spawn_reaper(jobs: Arc<Mutex<HashMap<u64, Arc<Job>>>>) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(3));
+        let now = Instant::now();
+        let mut map = jobs.lock().unwrap();
+        for job in map.values() {
+            let running =
+                job.result.lock().unwrap().is_none() && !job.cancelled.load(Ordering::Relaxed);
+            if running && now.duration_since(*job.last_seen.lock().unwrap()) > JOB_LEASE {
+                job.cancelled.store(true, Ordering::Relaxed);
+                job.stop.store(true, Ordering::Relaxed);
+                *job.finished.lock().unwrap() = Some(now);
+            }
+        }
+        map.retain(|_, job| match *job.finished.lock().unwrap() {
+            Some(t) => now.duration_since(t) < JOB_RETAIN,
+            None => true,
+        });
+    });
+}
+
+/// Build a fully-specified board from a plan request (columns + undealt stock).
+fn board_from_plan(req: &PlanRequest) -> Result<Board, (StatusCode, String)> {
+    if !matches!(req.suits, 1 | 2 | 4) {
+        return Err((StatusCode::BAD_REQUEST, "suits must be 1, 2, or 4".into()));
+    }
+    if req.columns.len() != 10 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("expected 10 columns, got {}", req.columns.len()),
+        ));
+    }
+    let mut columns: Vec<(u8, Vec<Card>)> = Vec::with_capacity(10);
+    for (i, col) in req.columns.iter().enumerate() {
+        let mut cards = Vec::with_capacity(col.cards.len());
+        for c in &col.cards {
+            cards.push(to_card(c, req.suits).map_err(|e| (StatusCode::BAD_REQUEST, format!("column {i}: {e}")))?);
+        }
+        columns.push((col.face_down, cards));
+    }
+    let mut stock = Vec::with_capacity(req.stock.len());
+    for c in &req.stock {
+        stock.push(to_card(c, req.suits).map_err(|e| (StatusCode::BAD_REQUEST, format!("stock: {e}")))?);
+    }
+    let mut board = Board::from_parts(&columns, &stock).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    board.allow_deal_with_empty = req.allow_deal_with_empty;
+    Ok(board)
+}
+
+/// Turn a completed solve into the same `PlanResponse` shape the `/plan` solve
+/// path returns, so the UI renders a job result exactly like a synchronous one.
+fn solve_response(board: &Board, result: SolveResult) -> PlanResponse {
+    match result.moves {
+        Some(moves) => {
+            let mut check = board.clone();
+            for &m in &moves {
+                check.make(m);
+            }
+            PlanResponse {
+                phase: "solve".to_string(),
+                note: format!("Everything is known — here is a {}-move winning line.", moves.len()),
+                moves: moves.iter().map(move_dto).collect(),
+                uncovers: None,
+                verified: Some(check.is_won()),
+                winning_config: result.winning_config.map(|(weight, fdw)| ConfigDto { weight, fdw }),
+                nodes_searched: Some(result.nodes),
+                deep: None,
+            }
+        }
+        None => PlanResponse {
+            phase: "stuck".to_string(),
+            note: format!(
+                "No winning line found after {} nodes — this position may be extremely hard, or a filled-in card may be wrong. Try ↶ Undo, or run the search again.",
+                result.nodes
+            ),
+            moves: Vec::new(),
+            uncovers: None,
+            verified: None,
+            winning_config: None,
+            nodes_searched: Some(result.nodes),
+            deep: None,
+        },
+    }
 }
 
 /// Request body for `POST /solve`. A deal is identified by `suits` + `seed`
@@ -76,14 +303,14 @@ struct BoardDto {
     stock_count: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum MoveDto {
     Tableau { from: u8, to: u8, count: u8 },
     Deal,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ConfigDto {
     weight: u32,
     fdw: u32,
@@ -358,7 +585,7 @@ fn default_deep_depth() -> usize {
     200
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct PlanResponse {
     /// "discover" (uncover more cards), "solve" (full solution), or "stuck".
     phase: String,

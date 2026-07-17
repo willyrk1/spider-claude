@@ -16,23 +16,57 @@ export type PlanResponse = {
   deep?: boolean;
 };
 
-/** POST /plan — discover more cards, or (once all known) the full solution. */
-export async function plan(params: {
+export type PlanParams = {
   suits: number;
   columns: PlanColumn[];
   stock: PlanCard[];
   allow_deal_with_empty?: boolean;
   /** Opt in to the deeper reveal search when the normal one is stuck. */
   deep?: boolean;
-}): Promise<PlanResponse> {
-  const res = await fetch('/api/plan', {
+};
+
+async function postJson(url: string, body: unknown) {
+  const res = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(params),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`API ${res.status}${text ? `: ${text}` : ''}`);
   }
   return res.json();
+}
+
+/** POST /plan — discover more cards, or (once all known) the full solution. */
+export function plan(params: PlanParams): Promise<PlanResponse> {
+  return postJson('/api/plan', params);
+}
+
+// ---- Async solve jobs (long, cancellable, polled) ----
+
+export type SolveJobStatus = {
+  status: 'running' | 'done' | 'cancelled';
+  nodes: number;
+  elapsed_ms: number;
+  result?: PlanResponse;
+};
+
+/** POST /solve/jobs — kick off a background solve of a fully-known board. */
+export async function startSolveJob(params: PlanParams): Promise<number> {
+  const { job_id } = await postJson('/api/solve/jobs', params);
+  return job_id;
+}
+
+/** GET /solve/jobs/:id — poll a job (also renews its lease/heartbeat). */
+export async function pollSolveJob(id: number): Promise<SolveJobStatus | null> {
+  const res = await fetch(`/api/solve/jobs/${id}`);
+  if (res.status === 404) return null; // reaped or unknown
+  if (!res.ok) throw new Error(`API ${res.status}`);
+  return res.json();
+}
+
+/** DELETE /solve/jobs/:id — cancel a running job. */
+export async function cancelSolveJob(id: number): Promise<void> {
+  await fetch(`/api/solve/jobs/${id}`, { method: 'DELETE' }).catch(() => {});
 }

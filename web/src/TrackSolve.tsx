@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Board, Foundations } from './Board';
-import { plan, type PlanResponse } from './api';
+import { cancelSolveJob, plan, pollSolveJob, startSolveJob, type PlanResponse } from './api';
 import {
   boardDisplayState,
   boardToDisplayState,
@@ -85,6 +85,9 @@ export default function TrackSolve() {
   const [resp, setResp] = useState<PlanResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Long solves run as a background job the UI polls (with a Cancel).
+  const [solveJob, setSolveJob] = useState<number | null>(null);
+  const [jobProgress, setJobProgress] = useState<{ nodes: number; elapsedMs: number } | null>(null);
   const [drafts, setDrafts] = useState<Record<number, string>>({});
   const [sessionText, setSessionText] = useState('');
   const [copied, setCopied] = useState(false);
@@ -265,6 +268,77 @@ export default function TrackSolve() {
     }
   }
 
+  /** Start a background solve of the fully-known board and poll it. */
+  async function onSolveJob() {
+    setError(null);
+    setResp(null);
+    try {
+      const id = await startSolveJob({
+        suits,
+        columns: planColumns(board, deal),
+        stock: planStock(board, deal),
+        allow_deal_with_empty: ALLOW_DEAL_WITH_EMPTY_COLUMNS,
+      });
+      setJobProgress({ nodes: 0, elapsedMs: 0 });
+      setSolveJob(id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function cancelSolve() {
+    if (solveJob !== null) cancelSolveJob(solveJob);
+    setSolveJob(null);
+    setJobProgress(null);
+  }
+
+  // Poll the running solve job ~1×/s (which also renews its server-side lease).
+  useEffect(() => {
+    if (solveJob === null) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = async () => {
+      try {
+        const s = await pollSolveJob(solveJob);
+        if (stopped) return;
+        if (!s) {
+          setSolveJob(null);
+          setJobProgress(null);
+          setError('The solve was dropped (server restarted or it timed out). Try again.');
+          return;
+        }
+        setJobProgress({ nodes: s.nodes, elapsedMs: s.elapsed_ms });
+        if (s.status === 'done') {
+          setSolveJob(null);
+          setJobProgress(null);
+          if (s.result) setResp(s.result);
+        } else if (s.status === 'cancelled') {
+          setSolveJob(null);
+          setJobProgress(null);
+        } else {
+          timer = setTimeout(tick, 1000);
+        }
+      } catch {
+        if (!stopped) timer = setTimeout(tick, 1500);
+      }
+    };
+    timer = setTimeout(tick, 300);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [solveJob]);
+
+  // If the board changes under a running job, its result is stale — cancel it.
+  useEffect(() => {
+    if (solveJob !== null) {
+      cancelSolveJob(solveJob);
+      setSolveJob(null);
+      setJobProgress(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [board]);
+
   function applyMoves() {
     if (!resp) return;
     const acts: Action[] = resp.moves.map((m) =>
@@ -294,8 +368,18 @@ export default function TrackSolve() {
     <div className="track">
       <aside className="sidebar">
         <div className="controls">
-          <button className="primary big" onClick={() => onPlan()} disabled={loading || unfilled}>
-            {loading ? 'Thinking…' : fullyKnown(board, deal) ? '✦ Solve!' : '✦ Get next steps'}
+          <button
+            className="primary big"
+            onClick={() => (fullyKnown(board, deal) ? onSolveJob() : onPlan())}
+            disabled={loading || unfilled || solveJob !== null}
+          >
+            {solveJob !== null
+              ? 'Solving…'
+              : loading
+                ? 'Thinking…'
+                : fullyKnown(board, deal)
+                  ? '✦ Solve!'
+                  : '✦ Get next steps'}
           </button>
           <div className="control-row">
             <label className="suits">
@@ -334,6 +418,24 @@ export default function TrackSolve() {
             <button onClick={reset}>New game</button>
           </div>
         </div>
+
+        {solveJob !== null && (
+          <div className="banner good solving">
+            <div className="solving-head">
+              <span className="spinner" />
+              <b>Searching for a solution…</b>
+            </div>
+            <div className="solve-progress">
+              {jobProgress
+                ? `${(jobProgress.nodes / 1e6).toFixed(0)}M nodes · ${(jobProgress.elapsedMs / 1000).toFixed(0)}s`
+                : 'starting…'}
+            </div>
+            <p className="hint" style={{ margin: '4px 0 8px' }}>
+              Runs until it finds a line or you cancel. Hard deals can take minutes.
+            </p>
+            <button onClick={cancelSolve}>Cancel search</button>
+          </div>
+        )}
 
         {error && <div className="banner error">⚠ {error}</div>}
 
