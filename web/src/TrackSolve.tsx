@@ -176,6 +176,7 @@ export default function TrackSolve() {
     stockRemaining(board) > 0 && (ALLOW_DEAL_WITH_EMPTY_COLUMNS || !emptyColumns) && !unfilled;
 
   function reset() {
+    setSuits(4); // a fresh game defaults to the full 4-suit deck
     setDeal(newInitialDeal());
     setActions([]);
     setResp(null);
