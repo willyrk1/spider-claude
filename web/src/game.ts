@@ -324,6 +324,24 @@ export function boardToGameState(ob: OriginBoard, deal: InitialDeal): GameState 
   };
 }
 
+/**
+ * Like `boardToGameState`, but tolerant of unknowns (rendered as rank-0 "?"),
+ * and with the undealt stock included so a *reveal* plan (which can contain
+ * deals, and ends by exposing an unknown) can be replayed and stepped on the
+ * board just like a full solution.
+ */
+export function boardToDisplayState(ob: OriginBoard, deal: InitialDeal): GameState {
+  return {
+    columns: ob.columns.map((c) => ({
+      cards: c.cards.map((o) => originValue(deal, o) ?? { rank: 0, suit: 0 }),
+      faceDown: c.faceDown,
+    })),
+    stock: stockForEngine(ob, deal).map((c) => c ?? { rank: 0, suit: 0 }),
+    completed: 0,
+    completedSuits: [],
+  };
+}
+
 /** The current position as a /plan request (columns + undealt stock). */
 export function planColumns(ob: OriginBoard, deal: InitialDeal) {
   return ob.columns.map((c) => ({

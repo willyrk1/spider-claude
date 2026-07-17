@@ -3,7 +3,7 @@ import { Board, Foundations } from './Board';
 import { plan, type PlanResponse } from './api';
 import {
   boardDisplayState,
-  boardToGameState,
+  boardToDisplayState,
   cardToShort,
   computeStates,
   deduceLastUnknown,
@@ -26,7 +26,6 @@ import {
   serializeTrack,
   stockRemaining,
   type Action,
-  type GameState,
   type InitialDeal,
 } from './game';
 
@@ -93,18 +92,40 @@ export default function TrackSolve() {
   // A deep-search plan is shown only after the user confirms (it can be long).
   const [deepConfirmed, setDeepConfirmed] = useState(false);
 
-  // Solve-phase player.
-  const [states, setStates] = useState<GameState[] | null>(null);
+  // Plan player (shared by reveal plans and full solutions).
   const [step, setStep] = useState(0);
   const [playing, setPlaying] = useState(false);
   // Bumped on each *forward* step so the board animates the moved cards.
-  // Back/jump/scrub leave it unchanged, so those update instantly.
+  // Back/jump/click leave it unchanged, so those update instantly.
   const [animNonce, setAnimNonce] = useState(0);
+
+  // A plan is shown (and steppable) once we have moves — immediately for a
+  // solution or a shallow reveal; a deep plan waits for the user to confirm.
+  const showPlan =
+    !!resp &&
+    resp.moves.length > 0 &&
+    (resp.phase === 'solve' || !resp.deep || deepConfirmed);
+
+  // The board after each move of the shown plan, replayed on the current board.
+  const planStates = useMemo(
+    () => (showPlan ? computeStates(boardToDisplayState(board, deal), resp!.moves) : null),
+    [showPlan, resp, board, deal],
+  );
+
+  // Reset the player whenever the shown plan changes.
+  useEffect(() => {
+    setStep(0);
+    setPlaying(false);
+  }, [planStates]);
 
   /** Advance one move, animating the cards. Used by Next and Play. */
   function advance() {
     setAnimNonce((n) => n + 1);
-    setStep((s) => Math.min((states?.length ?? 1) - 1, s + 1));
+    setStep((s) => Math.min((planStates?.length ?? 1) - 1, s + 1));
+  }
+  function goTo(s: number) {
+    setPlaying(false);
+    setStep(s);
   }
 
   useEffect(() => {
@@ -137,14 +158,14 @@ export default function TrackSolve() {
   }, [deal, suits]);
 
   useEffect(() => {
-    if (!playing || !states) return;
-    if (step >= states.length - 1) {
+    if (!playing || !planStates) return;
+    if (step >= planStates.length - 1) {
       setPlaying(false);
       return;
     }
-    const id = setTimeout(advance, 260);
+    const id = setTimeout(advance, 300);
     return () => clearTimeout(id);
-  }, [playing, step, states]);
+  }, [playing, step, planStates]);
 
   const unfilled = hasUnrevealed(board, deal);
   const emptyColumns = board.columns.some((c) => c.cards.length === 0);
@@ -156,7 +177,6 @@ export default function TrackSolve() {
     setActions([]);
     setResp(null);
     setError(null);
-    setStates(null);
     setDrafts({});
     setDeduced(null);
   }
@@ -166,7 +186,6 @@ export default function TrackSolve() {
     setActions([]);
     setResp(null);
     setError(null);
-    setStates(null);
     setDrafts({});
   }
 
@@ -176,7 +195,6 @@ export default function TrackSolve() {
     setActions((a) => a.slice(0, -1));
     setResp(null);
     setError(null);
-    setStates(null);
     setDrafts({});
   }
 
@@ -204,7 +222,6 @@ export default function TrackSolve() {
     setDeal(d);
     setActions(a);
     setResp(null);
-    setStates(null);
     setError(null);
     setDrafts({});
     setDeduced(null);
@@ -230,8 +247,6 @@ export default function TrackSolve() {
     }
     setLoading(true);
     setError(null);
-    setPlaying(false);
-    setStates(null);
     setDeepConfirmed(false);
     try {
       const r = await plan({
@@ -242,10 +257,6 @@ export default function TrackSolve() {
         deep,
       });
       setResp(r);
-      if (r.phase === 'solve') {
-        setStates(computeStates(boardToGameState(board, deal), r.moves));
-        setStep(0);
-      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setResp(null);
@@ -272,180 +283,242 @@ export default function TrackSolve() {
   }
 
   const revealCols = revealTargets(board, deal);
-  const solving = resp?.phase === 'solve' && states;
-  const currentMove = solving && step > 0 ? resp!.moves[step - 1] : null;
+  const isSolve = resp?.phase === 'solve';
+  const currentMove = showPlan && step > 0 ? resp!.moves[step - 1] : null;
+  const displayState = planStates ? planStates[step] : boardDisplayState(board, deal);
+  const lastState = planStates ? planStates[planStates.length - 1] : null;
+  const showFoundations = !!planStates && (isSolve || (lastState?.completed ?? 0) > 0);
+  const atEnd = !planStates || step >= planStates.length - 1;
 
   return (
     <div className="track">
-      <p className="hint">
-        Track a real game as you go. Type in the face-up cards you can see; ask
-        for <b>next steps</b> to uncover more; fill in each revealed <b>?</b>{' '}
-        card; <b>deal a row</b> when stuck. <b>↶ Undo</b> reverses the last move
-        or deal (revealed cards stay known) — press it repeatedly to back out of
-        a dead end. Once every card is known, it returns the full winning
-        solution.
-      </p>
-
-      <div className="controls">
-        <label>
-          Suits
-          <select value={suits} onChange={(e) => { setSuits(Number(e.target.value)); setResp(null); }}>
-            <option value={1}>1</option>
-            <option value={2}>2</option>
-            <option value={4}>4</option>
-          </select>
-        </label>
-        <button className="primary" onClick={() => onPlan()} disabled={loading || unfilled}>
-          {loading ? 'Thinking…' : fullyKnown(board, deal) ? 'Solve!' : 'Get next steps'}
-        </button>
-        <button onClick={dealRow} disabled={!canDeal} title={canDeal ? '' : 'Deal needs cards in the stock, no empty columns, and no unfilled ? cards'}>
-          Deal a row ({stockRemaining(board)})
-        </button>
-        <button onClick={undo} disabled={actions.length === 0} title="Undo the last move or deal">
-          ↶ Undo
-        </button>
-        <button onClick={backToStart} disabled={actions.length === 0} title="Rewind all moves and deals back to the original deal">
-          ⟲ Original deal
-        </button>
-        <button onClick={reset}>New game</button>
-      </div>
-
-      <details className="session">
-        <summary>💾 Save / load session</summary>
-        <p className="hint">
-          The session is the (partially-known) initial deal plus your moves &
-          deals — so it reproduces the game exactly. Copy it to save, share, or
-          report a bug; paste one back and <b>Load from text</b> to replay it.
-          Also auto-saves in this browser.
-        </p>
-        <div className="session-actions">
-          <button onClick={onCopySession}>
-            {copied ? 'Copied ✓' : 'Copy current session'}
+      <aside className="sidebar">
+        <div className="controls">
+          <button className="primary big" onClick={() => onPlan()} disabled={loading || unfilled}>
+            {loading ? 'Thinking…' : fullyKnown(board, deal) ? '✦ Solve!' : '✦ Get next steps'}
           </button>
-          <button onClick={onLoadSession}>Load from text</button>
-        </div>
-        <textarea
-          className="session-text"
-          rows={8}
-          value={sessionText}
-          onChange={(e) => setSessionText(e.target.value)}
-          placeholder="Click 'Copy current session' to fill this box, or paste a previously-saved session here and click 'Load from text'."
-        />
-      </details>
-
-      {error && <div className="banner error">⚠ {error}</div>}
-
-      {deduced && (
-        <div className="banner good">
-          Only one card was unknown, so it's deduced: <b>{deduced}</b> (the one
-          card missing from everything else). The deck is now fully known — hit{' '}
-          <b>Solve!</b>.
-        </div>
-      )}
-
-      {revealCols.length > 0 && (
-        <div className="reveals">
-          <b>Type in the revealed cards:</b>
-          {revealCols.map((c) => (
-            <span key={c} className="reveal-input">
-              col {c}
-              <input
-                autoFocus={c === revealCols[0]}
-                placeholder="?"
-                value={drafts[c] ?? ''}
-                onChange={(e) => setDrafts((d) => ({ ...d, [c]: e.target.value }))}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') fillCard(c, (e.target as HTMLInputElement).value);
+          <div className="control-row">
+            <label className="suits">
+              Suits
+              <select
+                value={suits}
+                onChange={(e) => {
+                  setSuits(Number(e.target.value));
+                  setResp(null);
                 }}
-                onBlur={(e) => e.target.value.trim() && fillCard(c, e.target.value)}
-              />
-            </span>
-          ))}
-        </div>
-      )}
-
-      {resp && resp.phase !== 'solve' && (
-        <>
-          <div className={`banner ${resp.phase === 'discover' ? 'good' : 'warn'}`}>{resp.note}</div>
-
-          {/* Normal search came up empty — offer the slower, deeper search. */}
-          {resp.phase === 'stuck' && !resp.deep && (
-            <button className="primary" onClick={() => onPlan(true)} disabled={loading}>
-              {loading ? 'Searching deeper…' : '🔎 Search deeper (slow; may return a long plan)'}
+              >
+                <option value={1}>1</option>
+                <option value={2}>2</option>
+                <option value={4}>4</option>
+              </select>
+            </label>
+            <button
+              onClick={dealRow}
+              disabled={!canDeal}
+              title={canDeal ? '' : 'Deal needs cards in the stock, no empty columns, and no unfilled ? cards'}
+            >
+              Deal a row ({stockRemaining(board)})
             </button>
-          )}
+          </div>
+          <div className="control-row">
+            <button onClick={undo} disabled={actions.length === 0} title="Undo the last move or deal">
+              ↶ Undo
+            </button>
+            <button
+              onClick={backToStart}
+              disabled={actions.length === 0}
+              title="Rewind all moves and deals back to the original deal"
+            >
+              ⟲ Original
+            </button>
+            <button onClick={reset}>New game</button>
+          </div>
+        </div>
 
-          {resp.moves.length > 0 && resp.deep && !deepConfirmed ? (
-            /* Deep plan found — warn and confirm before showing/applying it. */
-            <div className="banner warn">
-              ⚠ This is a <b>{resp.moves.length}-move</b> maneuver — long and
-              committal. Continue only if you want to play it all out.
-              <div className="session-actions" style={{ marginTop: 8 }}>
-                <button className="primary" onClick={() => setDeepConfirmed(true)}>
-                  Show the {resp.moves.length}-move plan
-                </button>
-                <button onClick={() => setResp(null)}>Cancel</button>
-              </div>
+        {error && <div className="banner error">⚠ {error}</div>}
+
+        {deduced && (
+          <div className="banner good">
+            Only one card was unknown, so it's deduced: <b>{deduced}</b>. The deck
+            is now fully known — hit <b>Solve!</b>.
+          </div>
+        )}
+
+        {revealCols.length > 0 && (
+          <div className="reveals">
+            <b>Type in the revealed cards:</b>
+            {revealCols.map((c) => (
+              <span key={c} className="reveal-input">
+                col {c}
+                <input
+                  autoFocus={c === revealCols[0]}
+                  placeholder="?"
+                  value={drafts[c] ?? ''}
+                  onChange={(e) => setDrafts((d) => ({ ...d, [c]: e.target.value }))}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') fillCard(c, (e.target as HTMLInputElement).value);
+                  }}
+                  onBlur={(e) => e.target.value.trim() && fillCard(c, e.target.value)}
+                />
+              </span>
+            ))}
+          </div>
+        )}
+
+        {resp && (
+          <div className="plan">
+            <div className={`banner ${isSolve || resp.phase === 'discover' ? 'good' : 'warn'}`}>
+              {resp.note}
+              {isSolve && resp.verified ? ' ✓ verified' : ''}
             </div>
-          ) : (
-            resp.moves.length > 0 && (
+
+            {/* Normal search came up empty — offer the slower, deeper search. */}
+            {resp.phase === 'stuck' && !resp.deep && (
+              <button className="primary" onClick={() => onPlan(true)} disabled={loading}>
+                {loading ? 'Searching deeper…' : '🔎 Search deeper (slow)'}
+              </button>
+            )}
+
+            {/* Deep plan found — confirm before showing/stepping it. */}
+            {resp.moves.length > 0 && resp.deep && !deepConfirmed && (
+              <div className="banner warn">
+                ⚠ A <b>{resp.moves.length}-move</b> maneuver. Step through it to
+                review before playing it out.
+                <div className="plan-actions">
+                  <button className="primary" onClick={() => setDeepConfirmed(true)}>
+                    Review the {resp.moves.length} moves
+                  </button>
+                  <button onClick={() => setResp(null)}>Cancel</button>
+                </div>
+              </div>
+            )}
+
+            {showPlan && planStates && (
               <>
+                <div className="player-bar">
+                  <button onClick={() => goTo(0)} disabled={step === 0} title="Start">
+                    ⏮
+                  </button>
+                  <button onClick={() => goTo(Math.max(0, step - 1))} disabled={step === 0} title="Back">
+                    ◀
+                  </button>
+                  <button
+                    className="primary"
+                    onClick={() => setPlaying((p) => !p)}
+                    disabled={atEnd}
+                    title="Play"
+                  >
+                    {playing ? '❚❚' : '▶'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setPlaying(false);
+                      advance();
+                    }}
+                    disabled={atEnd}
+                    title="Next"
+                  >
+                    ▶▶
+                  </button>
+                  <button
+                    onClick={() => goTo(planStates.length - 1)}
+                    disabled={atEnd}
+                    title="End"
+                  >
+                    ⏭
+                  </button>
+                  <span className="counter">
+                    {step} / {planStates.length - 1}
+                  </span>
+                </div>
+
                 <ol className="move-list">
                   {resp.moves.map((m, i) => (
-                    <li key={i}>{describeMove(m)}</li>
+                    <li
+                      key={i}
+                      className={i === step - 1 ? 'current' : ''}
+                      onClick={() => goTo(i + 1)}
+                      title="Jump to this move"
+                    >
+                      {describeMove(m)}
+                    </li>
                   ))}
                 </ol>
-                <button className="primary" onClick={applyMoves}>
-                  Apply these moves ↴
-                </button>
+
+                {!isSolve && (
+                  <button className="primary" onClick={applyMoves}>
+                    Apply these moves ↴
+                  </button>
+                )}
               </>
-            )
+            )}
+          </div>
+        )}
+
+        <details className="info">
+          <summary>ℹ️ How this works</summary>
+          <p className="hint">
+            Track a real game as you go. Type in the face-up cards you can see;
+            ask for <b>next steps</b> to uncover more; fill in each revealed{' '}
+            <b>?</b> card; <b>deal a row</b> when stuck. <b>↶ Undo</b> reverses the
+            last move or deal (revealed cards stay known). Suggested plans can be
+            stepped through on the board — click any move to jump there, then{' '}
+            <b>Apply</b> to play it. Once every card is known, it returns the full
+            winning solution.
+          </p>
+        </details>
+
+        <details className="session">
+          <summary>💾 Save / load session</summary>
+          <p className="hint">
+            The session is the initial deal plus your moves & deals — it reproduces
+            the game exactly. Copy it to save, share, or report a bug; paste one
+            back and <b>Load from text</b> to replay it. Also auto-saves here and
+            in the URL.
+          </p>
+          <div className="session-actions">
+            <button onClick={onCopySession}>{copied ? 'Copied ✓' : 'Copy session'}</button>
+            <button onClick={onLoadSession}>Load from text</button>
+          </div>
+          <textarea
+            className="session-text"
+            rows={7}
+            value={sessionText}
+            onChange={(e) => setSessionText(e.target.value)}
+            placeholder="Click 'Copy session' to fill this box, or paste a saved session and click 'Load from text'."
+          />
+        </details>
+      </aside>
+
+      <main className="board-area">
+        <div className="board-caption">
+          {planStates ? (
+            <>
+              {currentMove ? describeMove(currentMove) : isSolve ? 'Starting position' : 'Before the plan'}
+              {showFoundations && (
+                <span className="completed"> · {displayState.completed}/8 runs</span>
+              )}
+            </>
+          ) : (
+            <>Your board{unfilled ? ' — fill in the ? cards' : ''}</>
           )}
-        </>
-      )}
-
-      {solving && (
-        <div className="result">
-          <div className="banner good">
-            {resp!.note} {resp!.verified ? '✓ verified' : ''}
-            {resp!.winning_config
-              ? ` · via weight ${resp!.winning_config.weight}, fdw ${resp!.winning_config.fdw}`
-              : ''}
-          </div>
-          <div className="player-bar">
-            <button onClick={() => { setPlaying(false); setStep(0); }}>⏮</button>
-            <button onClick={() => { setPlaying(false); setStep((s) => Math.max(0, s - 1)); }}>◀</button>
-            <button className="primary" onClick={() => setPlaying((p) => !p)} disabled={step >= states!.length - 1}>
-              {playing ? '❚❚ Pause' : '▶ Play'}
-            </button>
-            <button onClick={() => { setPlaying(false); advance(); }} disabled={step >= states!.length - 1}>▶</button>
-            <button onClick={() => { setPlaying(false); setStep(states!.length - 1); }}>⏭</button>
-            <span className="counter">move {step} / {states!.length - 1}</span>
-          </div>
-          <div className="move-desc">
-            {currentMove ? describeMove(currentMove) : 'Start'}{' '}
-            <span className="completed">· {states![step].completed}/8 runs complete</span>
-          </div>
-          <Foundations
-            suits={states![step].completedSuits}
-            justCompleted={step > 0 && states![step].completed > states![step - 1].completed}
-          />
-          <Board
-            state={states![step]}
-            move={currentMove}
-            showStock={false}
-            prevState={step > 0 ? states![step - 1] : null}
-            animNonce={animNonce}
-          />
         </div>
-      )}
 
-      {!solving && (
-        <>
-          <h3 className="board-title">Your board {unfilled ? '— fill in the ? cards' : ''}</h3>
-          <Board state={boardDisplayState(board, deal)} move={null} showStock={false} />
-        </>
-      )}
+        {showFoundations && lastState && (
+          <Foundations
+            suits={displayState.completedSuits}
+            justCompleted={step > 0 && (planStates![step].completed > planStates![step - 1].completed)}
+          />
+        )}
+
+        <Board
+          state={displayState}
+          move={currentMove}
+          showStock={false}
+          prevState={planStates && step > 0 ? planStates[step - 1] : null}
+          animNonce={animNonce}
+        />
+      </main>
     </div>
   );
 }
