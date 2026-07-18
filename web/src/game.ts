@@ -203,7 +203,7 @@ export function parseCards(text: string): { cards: Card[]; error?: string } {
 // current board is derived by replaying the actions on the initial deal.
 
 const SUIT_SHORT = ['s', 'h', 'c', 'd'];
-const TABLEAU_SIZES = [6, 6, 6, 6, 5, 5, 5, 5, 5, 5];
+export const TABLEAU_SIZES = [6, 6, 6, 6, 5, 5, 5, 5, 5, 5];
 
 /** Card as shorthand, e.g. "Ks", "10h". */
 export function cardToShort(card: Card): string {

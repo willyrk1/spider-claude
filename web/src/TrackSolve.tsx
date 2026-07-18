@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Board, Foundations } from './Board';
+import PreFill from './PreFill';
 import { cancelSolveJob, plan, pollSolveJob, startSolveJob, type PlanResponse } from './api';
 import {
   boardDisplayState,
@@ -96,6 +97,8 @@ export default function TrackSolve() {
   const [deduced, setDeduced] = useState<string | null>(null);
   // A deep-search plan is shown only after the user confirms (it can be long).
   const [deepConfirmed, setDeepConfirmed] = useState(false);
+  // The blown-up "pre-fill the whole deck" editor.
+  const [prefillOpen, setPrefillOpen] = useState(false);
 
   // Plan player (shared by reveal plans and full solutions).
   const [step, setStep] = useState(0);
@@ -392,7 +395,23 @@ export default function TrackSolve() {
   const boardMove: Move | null = planStates ? currentMove : dealAnim ? { type: 'deal' } : null;
 
   return (
-    <div className="track">
+    <>
+      {prefillOpen && (
+        <PreFill
+          suits={suits}
+          deal={deal}
+          onSuits={(s) => {
+            setSuits(s);
+            setResp(null);
+          }}
+          onDeal={(update) => {
+            setDeal(update);
+            setResp(null);
+          }}
+          onClose={() => setPrefillOpen(false)}
+        />
+      )}
+      <div className="track">
       <aside className="sidebar">
         <div className="controls">
           <button
@@ -444,6 +463,9 @@ export default function TrackSolve() {
             </button>
             <button onClick={reset}>New game</button>
           </div>
+          <button onClick={() => setPrefillOpen(true)} title="Type in all the cards you already know">
+            ✎ Pre-fill deck…
+          </button>
         </div>
 
         {solveJob !== null && (
@@ -649,6 +671,7 @@ export default function TrackSolve() {
           onRevealCompletion={() => setHiddenCompletions((h) => Math.max(0, h - 1))}
         />
       </main>
-    </div>
+      </div>
+    </>
   );
 }
