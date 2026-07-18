@@ -101,10 +101,10 @@ export type StepAnim = {
   moved: GameState;
   /** Keys ("col-index") of the just-moved cards in `moved` — highlight + slide. */
   movedKeys: string[];
-  /** Board after a completed run (if any) is removed; else identical to `moved`. */
+  /** Board after every completed run is removed; else identical to `moved`. */
   afterComplete: GameState;
-  /** The finished run to animate away, if this move completed a suit. */
-  completion: { col: number; suit: number } | null;
+  /** Finished runs to animate away (a deal can complete more than one). */
+  completions: { col: number; suit: number }[];
   /** Face-down cards that turn up, top-first, to flip one at a time. */
   flips: { col: number; index: number }[];
 };
@@ -128,21 +128,26 @@ export function computeStepAnim(prev: GameState, move: Move, cur: GameState): St
     for (let k = 0; k < move.count; k++) movedKeys.push(`${move.to}-${start + k}`);
   }
 
-  // A finished run: the column whose top 13 cards `cur` removed.
+  // Finished runs: columns holding a completed K..A run in `moved` that `cur` has
+  // removed. Detected by card count (not the `completed` field, which the direct
+  // board doesn't track), and a deal can finish several, so pull runs until every
+  // column matches `cur`.
   const afterComplete = cloneState(moved);
-  let completion: { col: number; suit: number } | null = null;
-  if (cur.completed > prev.completed) {
+  const completions: { col: number; suit: number }[] = [];
+  while (true) {
+    let found = false;
     for (let c = 0; c < COLS; c++) {
       const col = afterComplete.columns[c].cards;
-      if (isKingRun(col.slice(col.length - 13))) {
+      if (col.length > cur.columns[c].cards.length && isKingRun(col.slice(col.length - 13))) {
         const suit = col[col.length - 13].suit;
         col.length -= 13;
         afterComplete.completed++;
         afterComplete.completedSuits.push(suit);
-        completion = { col: c, suit };
-        break; // one run per step is the norm; extras just skip the flourish
+        completions.push({ col: c, suit });
+        found = true;
       }
     }
+    if (!found) break;
   }
 
   // Face-down cards that flip up (source uncovered, or a completion uncovered),
@@ -153,7 +158,7 @@ export function computeStepAnim(prev: GameState, move: Move, cur: GameState): St
       flips.push({ col: c, index: i });
     }
   }
-  return { moved, movedKeys, afterComplete, completion, flips };
+  return { moved, movedKeys, afterComplete, completions, flips };
 }
 
 const RANK_NAMES = ['', 'A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];

@@ -192,7 +192,7 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
   // mid-animation. The Web Animations run purely for the visuals; if they're
   // throttled the frames still advance on the timers and the step still settles.
   async function playPhases(prev: GameState, mv: Move, cur: GameState, alive: () => boolean) {
-    const { moved, movedKeys, afterComplete, completion, flips } = computeStepAnim(prev, mv, cur);
+    const { moved, movedKeys, afterComplete, completions, flips } = computeStepAnim(prev, mv, cur);
     const commit = () => delay(24); // let React paint the new frame before we animate
 
     // Phase 1 — draw attention: highlight the cards about to move, at their source.
@@ -229,25 +229,44 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
     await delay(400);
     if (!alive()) return;
 
-    // Phase 3 — finished a suit: the run melts away, the King rides up to the top.
-    if (completion) {
-      const cards = moved.columns[completion.col].cards;
-      for (let i = cards.length - 13; i < cards.length; i++) {
-        const el = get(`${completion.col}-${i}`);
-        if (!el) continue;
-        el.style.zIndex = '70';
-        const isKing = i === cards.length - 13;
-        el.animate(
-          isKing
-            ? [
-                { opacity: 1, transform: 'translateY(0) scale(1)' },
-                { opacity: 0, transform: 'translateY(-96px) scale(0.9)' },
-              ]
-            : [{ opacity: 1, transform: 'scale(1)' }, { opacity: 0, transform: 'scale(0.45)' }],
-          { duration: 440, easing: 'ease-in', fill: 'forwards' },
+    // Phase 3 — finished a suit: highlight the whole run, vanish the cards top
+    // to bottom one at a time, then send the King up toward the foundations.
+    for (const { col } of completions) {
+      if (!alive()) return;
+      const cards = moved.columns[col].cards;
+      const kingIdx = cards.length - 13;
+      setHighlight(new Set(Array.from({ length: 13 }, (_, k) => `${col}-${kingIdx + k}`)));
+      await delay(260);
+      if (!alive()) return;
+      // Top of the run (the Ace) first, down to the Two just above the King.
+      for (let i = cards.length - 1; i > kingIdx; i--) {
+        const el = get(`${col}-${i}`);
+        if (el) {
+          el.style.zIndex = '70';
+          el.animate([{ opacity: 1, transform: 'scale(1)' }, { opacity: 0, transform: 'scale(0.4)' }], {
+            duration: 170,
+            easing: 'ease-in',
+            fill: 'forwards',
+          });
+        }
+        await delay(65);
+      }
+      await delay(120);
+      if (!alive()) return;
+      const king = get(`${col}-${kingIdx}`);
+      if (king) {
+        king.style.zIndex = '70';
+        king.animate(
+          [
+            { opacity: 1, transform: 'translateY(0) scale(1)' },
+            { opacity: 0, transform: 'translateY(-104px) scale(0.9)' },
+          ],
+          { duration: 360, easing: 'ease-in', fill: 'forwards' },
         );
       }
-      await delay(460);
+      await delay(380);
+    }
+    if (completions.length > 0) {
       if (!alive()) return;
       setFrame(afterComplete);
       await commit();

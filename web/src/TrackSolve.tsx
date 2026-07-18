@@ -26,7 +26,9 @@ import {
   serializeTrack,
   stockRemaining,
   type Action,
+  type GameState,
   type InitialDeal,
+  type Move,
 } from './game';
 
 const STORAGE_KEY = 'spider-track-session';
@@ -103,6 +105,9 @@ export default function TrackSolve() {
   const [animNonce, setAnimNonce] = useState(0);
   // Next gets the full multi-phase choreography; Play stays a quick slide.
   const [richAnim, setRichAnim] = useState(true);
+  // The board *before* a manual "Deal a row", so that deal (and any suit it
+  // completes) animates on the live board just like a playback step.
+  const [dealAnim, setDealAnim] = useState<GameState | null>(null);
 
   // A plan is shown (and steppable) once we have moves — immediately for a
   // solution or a shallow reveal; a deep plan waits for the user to confirm.
@@ -358,6 +363,9 @@ export default function TrackSolve() {
   }
 
   function dealRow() {
+    setDealAnim(boardDisplayState(board, deal)); // snapshot before the deal
+    setRichAnim(true);
+    setAnimNonce((n) => n + 1);
     setActions((a) => [...a, { kind: 'deal' }]);
     setResp(null);
   }
@@ -369,6 +377,9 @@ export default function TrackSolve() {
   const lastState = planStates ? planStates[planStates.length - 1] : null;
   const showFoundations = !!planStates && (isSolve || (lastState?.completed ?? 0) > 0);
   const atEnd = !planStates || step >= planStates.length - 1;
+  // The board Board animates from: a plan step, or a manual deal on the live board.
+  const boardPrev = planStates ? (step > 0 ? planStates[step - 1] : null) : dealAnim;
+  const boardMove: Move | null = planStates ? currentMove : dealAnim ? { type: 'deal' } : null;
 
   return (
     <div className="track">
@@ -622,9 +633,9 @@ export default function TrackSolve() {
 
         <Board
           state={displayState}
-          move={currentMove}
+          move={boardMove}
           showStock={false}
-          prevState={planStates && step > 0 ? planStates[step - 1] : null}
+          prevState={boardPrev}
           animNonce={animNonce}
           rich={richAnim}
         />
