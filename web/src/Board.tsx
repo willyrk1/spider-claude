@@ -135,6 +135,11 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
   const [flipHi, setFlipHi] = useState<string | null>(null);
   const cardEls = useRef<Map<string, HTMLDivElement>>(new Map());
   const token = useRef(0);
+  // A move's source-offset slide, queued so it can be applied in a layout effect
+  // the instant its `moved` frame commits — before the browser paints it — so the
+  // rich Next slide never flashes the cards at their destination first. (Play's
+  // quickSlide already applies its transform pre-paint, from the animNonce effect.)
+  const pendingSlide = useRef<{ token: number; apply: () => void } | null>(null);
 
   const get = (key: string) => cardEls.current.get(key);
 
@@ -161,6 +166,16 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
     void runRich(prevState, move, state, anim, held, my);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [animNonce]);
+
+  // Apply a queued move-slide the moment its frame commits, before that frame can
+  // paint (see pendingSlide). Fires on every richFrame change but no-ops unless a
+  // slide is queued for the animation still in flight.
+  useLayoutEffect(() => {
+    const ps = pendingSlide.current;
+    if (!ps || ps.token !== token.current) return;
+    pendingSlide.current = null;
+    ps.apply();
+  }, [richFrame]);
 
   function quickSlide(prev: GameState, cur: GameState, mv: Move, held: Steps, my: number) {
     // Hold the overlap steady for the slide (set from this layout effect, so it's
@@ -213,7 +228,7 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
     const alive = () => my === token.current;
     setAnimSteps(held);
     try {
-      await playPhases(anim, prev, mv, cur, held, alive);
+      await playPhases(anim, prev, mv, cur, held, alive, my);
     } catch {
       /* fall through to settle */
     }
@@ -234,6 +249,7 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
     cur: GameState,
     held: Steps,
     alive: () => boolean,
+    my: number,
   ) {
     const { moved, movedKeys, afterComplete, completions, flips } = anim;
     const commit = () => delay(24);
@@ -250,18 +266,26 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
     if (!alive()) return;
 
     // Phase 2 — move: relocate the cards, then slide them in with a downward dip.
+    // The source-offset transforms are queued and applied the instant the `moved`
+    // frame commits (in the richFrame layout effect, before it paints) — so the
+    // cards are never painted at their destination before the slide begins.
+    const offsets = moveOffsets(prev, moved, mv, held);
+    pendingSlide.current = {
+      token: my,
+      apply: () =>
+        offsets.forEach((d, key) => {
+          const el = get(key);
+          if (!el) return;
+          slideFromSource(el, d, 380, 'cubic-bezier(0.4, 0.02, 0.25, 1)', [
+            { transform: `translate(${d.dx}px, ${d.dy}px) scale(1.03)`, boxShadow: '0 10px 20px rgba(0,0,0,0.5)', offset: 0 },
+            { transform: `translate(${d.dx * 0.4}px, ${d.dy * 0.4 + 34}px) scale(1.05)`, offset: 0.55 },
+            { transform: 'translate(0, 0) scale(1)', boxShadow: '0 1px 2px rgba(0,0,0,0.35)', offset: 1 },
+          ]);
+        }),
+    };
     setRichFrame(moved);
     setHighlight(new Set(movedKeys));
     await commit();
-    moveOffsets(prev, moved, mv, held).forEach((d, key) => {
-      const el = get(key);
-      if (!el) return;
-      slideFromSource(el, d, 380, 'cubic-bezier(0.4, 0.02, 0.25, 1)', [
-        { transform: `translate(${d.dx}px, ${d.dy}px) scale(1.03)`, boxShadow: '0 10px 20px rgba(0,0,0,0.5)', offset: 0 },
-        { transform: `translate(${d.dx * 0.4}px, ${d.dy * 0.4 + 34}px) scale(1.05)`, offset: 0.55 },
-        { transform: 'translate(0, 0) scale(1)', boxShadow: '0 1px 2px rgba(0,0,0,0.35)', offset: 1 },
-      ]);
-    });
     await delay(400);
     if (!alive()) return;
 
