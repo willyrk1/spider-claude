@@ -197,14 +197,16 @@ button.big { padding: 11px 14px; font-size: 15px; }
 
 /* Board */
 .board {
-  display: flex; gap: 8px; align-items: flex-start; overflow-x: auto;
-  padding: 24px 4px 12px;
+  display: flex; gap: 8px; align-items: flex-start;
+  /* Horizontal scroll for wide boards; clip vertically so a card's transient
+     animation transform (dip / King rising) never spawns a vertical scrollbar. */
+  overflow-x: auto; overflow-y: hidden;
+  padding: 28px 4px 40px;
 }
 .column {
   position: relative; width: var(--card-w); min-height: var(--card-h);
   flex: 0 0 var(--card-w); border-radius: 8px;
 }
-.column.active { box-shadow: 0 0 0 2px var(--accent); }
 .col-label { position: absolute; top: -18px; width: 100%; text-align: center; font-size: 11px; color: var(--muted); }
 .empty-slot {
   position: absolute; top: 0; width: var(--card-w); height: var(--card-h);

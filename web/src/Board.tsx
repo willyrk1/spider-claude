@@ -27,6 +27,13 @@ function computeSteps(state: GameState): Steps {
   return { up: Math.max(MIN_UP, BASE_UP * scale), down: Math.max(MIN_DOWN, BASE_DOWN * scale) };
 }
 
+/** The most-scrunched overlap among a set of frames — held steady through a
+ * step's animation so cards never reflow or overflow mid-move; the board
+ * un-scrunches (if the move freed room) only after, when this is released. */
+function stableSteps(frames: GameState[]): Steps {
+  return frames.map(computeSteps).reduce((a, b) => (a.up <= b.up ? a : b));
+}
+
 /** Cumulative top offset (px) of each card in a column, at the given overlap. */
 function columnTops(col: Column, steps: Steps): number[] {
   let top = 0;
@@ -49,32 +56,26 @@ type Props = {
   rich?: boolean;
 };
 
-/** Which columns the current move touches, for a subtle highlight. */
-function activeCols(move: Move | null): Set<number> {
-  const s = new Set<number>();
-  if (move?.type === 'tableau') {
-    s.add(move.from);
-    s.add(move.to);
-  }
-  return s;
-}
-
 /**
  * Where each just-moved card started, as a `{dx, dy}` offset from its rendered
- * (destination) position — the animation plays it from there back to zero.
- * Keyed by `"col-index"` of the card in the *new* frame.
+ * position — the animation plays it from there back to zero. Keyed by
+ * `"col-index"` of the card in the target frame. `steps` is the overlap the
+ * board is rendered at (held constant through the step), so offsets line up.
  */
-function moveOffsets(prev: GameState, cur: GameState, move: Move | null): Map<string, { dx: number; dy: number }> {
+function moveOffsets(
+  prev: GameState,
+  cur: GameState,
+  move: Move | null,
+  steps: Steps,
+): Map<string, { dx: number; dy: number }> {
   const offsets = new Map<string, { dx: number; dy: number }>();
   if (!move) return offsets;
-  const prevSteps = computeSteps(prev);
-  const curSteps = computeSteps(cur);
 
   if (move.type === 'tableau') {
     if (cur.completed !== prev.completed) return offsets; // run vanished — nothing to land
     const { from, to, count } = move;
-    const toTops = columnTops(cur.columns[to], curSteps);
-    const fromTops = columnTops(prev.columns[from], prevSteps);
+    const toTops = columnTops(cur.columns[to], steps);
+    const fromTops = columnTops(prev.columns[from], steps);
     const startNew = cur.columns[to].cards.length - count;
     const startOld = prev.columns[from].cards.length - count;
     for (let k = 0; k < count; k++) {
@@ -124,41 +125,49 @@ export function Foundations({ suits, justCompleted }: { suits: number[]; justCom
 }
 
 export function Board({ state, move, showStock = true, prevState = null, animNonce, rich = true }: Props) {
-  // The board actually rendered. Normally === `state`; during a forward-step
-  // animation it walks through intermediate frames (source → moved → run
-  // removed → flips) that don't each correspond to a single game state.
-  const [frame, setFrame] = useState<GameState>(state);
+  // Normally the board is rendered straight from `state` (so jumps/Play never
+  // lag). Only during the multi-phase Next choreography does `richFrame` override
+  // it with intermediate frames. `animSteps`, when set, freezes the overlap for a
+  // step's whole animation (see stableSteps).
+  const [richFrame, setRichFrame] = useState<GameState | null>(null);
+  const [animSteps, setAnimSteps] = useState<Steps | null>(null);
   const [highlight, setHighlight] = useState<Set<string>>(() => new Set());
   const [flipHi, setFlipHi] = useState<string | null>(null);
   const cardEls = useRef<Map<string, HTMLDivElement>>(new Map());
-  // Bumped whenever the requested board changes; a running animation aborts once
-  // its token is stale, so rapid stepping never leaves a half-played frame.
   const token = useRef(0);
 
   const get = (key: string) => cardEls.current.get(key);
 
-  // Any change to the requested state cancels a running animation and shows it.
+  // A new requested state cancels a running animation and shows it (functional
+  // updates bail when nothing changes, so static re-renders stay cheap).
   useLayoutEffect(() => {
     token.current++;
-    setFrame(state);
-    setHighlight(new Set());
-    setFlipHi(null);
+    setRichFrame((f) => (f ? null : f));
+    setAnimSteps((s) => (s ? null : s));
+    setHighlight((h) => (h.size ? new Set() : h));
+    setFlipHi((f) => (f ? null : f));
   }, [state]);
 
-  // A forward step animates from `prevState`; Play uses a quick slide.
+  // A forward step (Next / Play) animates from `prevState`.
   useLayoutEffect(() => {
     if (prevState == null || move == null) return;
     const my = ++token.current;
+    const anim = computeStepAnim(prevState, move, state);
+    const held = stableSteps([prevState, anim.moved, anim.afterComplete, state]);
     if (!rich) {
-      quickSlide(prevState, state, move);
+      quickSlide(prevState, state, move, held, my);
       return;
     }
-    void runRich(prevState, move, state, my);
+    void runRich(prevState, move, state, anim, held, my);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [animNonce]);
 
-  function quickSlide(prev: GameState, cur: GameState, mv: Move) {
-    moveOffsets(prev, cur, mv).forEach((d, key) => {
+  function quickSlide(prev: GameState, cur: GameState, mv: Move, held: Steps, my: number) {
+    // Hold the overlap steady for the slide. Set from this layout effect, so it's
+    // flushed before the first paint — the cards are already in place (no flash
+    // onto the destination) and won't reflow mid-slide.
+    setAnimSteps(held);
+    moveOffsets(prev, cur, mv, held).forEach((d, key) => {
       const el = get(key);
       if (!el) return;
       el.style.zIndex = '60';
@@ -170,47 +179,63 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
         el.style.zIndex = '';
       };
     });
+    setTimeout(() => {
+      if (token.current === my) setAnimSteps((s) => (s ? null : s)); // un-scrunch after
+    }, 230);
   }
 
-  async function runRich(prev: GameState, mv: Move, cur: GameState, my: number) {
+  async function runRich(
+    prev: GameState,
+    mv: Move,
+    cur: GameState,
+    anim: ReturnType<typeof computeStepAnim>,
+    held: Steps,
+    my: number,
+  ) {
     const alive = () => my === token.current;
+    setAnimSteps(held);
     try {
-      await playPhases(prev, mv, cur, alive);
+      await playPhases(anim, prev, mv, cur, held, alive);
     } catch {
       /* fall through to settle */
     }
-    // Whatever happened, land exactly on the target (unless a newer step took over).
     if (alive()) {
       setHighlight(new Set());
       setFlipHi(null);
-      setFrame(cur);
+      setRichFrame(null);
+      setAnimSteps(null); // un-scrunch only now, after the whole animation
     }
   }
 
-  // Sequencing is driven by `delay` (setTimeout), never rAF or WAAPI `.finished`
-  // — those freeze when the tab isn't foreground, which would strand a step
-  // mid-animation. The Web Animations run purely for the visuals; if they're
-  // throttled the frames still advance on the timers and the step still settles.
-  async function playPhases(prev: GameState, mv: Move, cur: GameState, alive: () => boolean) {
-    const { moved, movedKeys, afterComplete, completions, flips } = computeStepAnim(prev, mv, cur);
-    const commit = () => delay(24); // let React paint the new frame before we animate
+  // Timeout-driven (never rAF / WAAPI `.finished`, which freeze in a backgrounded
+  // tab); the Web Animations run only for the visuals.
+  async function playPhases(
+    anim: ReturnType<typeof computeStepAnim>,
+    prev: GameState,
+    mv: Move,
+    cur: GameState,
+    held: Steps,
+    alive: () => boolean,
+  ) {
+    const { moved, movedKeys, afterComplete, completions, flips } = anim;
+    const commit = () => delay(24);
 
-    // Phase 1 — draw attention: highlight the cards about to move, at their source.
+    // Phase 1 — highlight the cards about to move, at their source.
     const sourceKeys =
       mv.type === 'tableau'
         ? Array.from({ length: mv.count }, (_, k) => `${mv.from}-${prev.columns[mv.from].cards.length - mv.count + k}`)
         : movedKeys;
-    setFrame(prev);
+    setRichFrame(prev);
     setHighlight(new Set(sourceKeys));
     await commit();
     await delay(280);
     if (!alive()) return;
 
     // Phase 2 — move: relocate the cards, then slide them in with a downward dip.
-    setFrame(moved);
+    setRichFrame(moved);
     setHighlight(new Set(movedKeys));
     await commit();
-    moveOffsets(prev, moved, mv).forEach((d, key) => {
+    moveOffsets(prev, moved, mv, held).forEach((d, key) => {
       const el = get(key);
       if (!el) return;
       el.style.zIndex = '60';
@@ -229,8 +254,8 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
     await delay(400);
     if (!alive()) return;
 
-    // Phase 3 — finished a suit: highlight the whole run, vanish the cards top
-    // to bottom one at a time, then send the King up toward the foundations.
+    // Phase 3 — finished a suit: highlight the whole run, vanish the cards top to
+    // bottom one at a time, then send the King up toward the foundations.
     for (const { col } of completions) {
       if (!alive()) return;
       const cards = moved.columns[col].cards;
@@ -238,7 +263,6 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
       setHighlight(new Set(Array.from({ length: 13 }, (_, k) => `${col}-${kingIdx + k}`)));
       await delay(260);
       if (!alive()) return;
-      // Top of the run (the Ace) first, down to the Two just above the King.
       for (let i = cards.length - 1; i > kingIdx; i--) {
         const el = get(`${col}-${i}`);
         if (el) {
@@ -268,7 +292,7 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
     }
     if (completions.length > 0) {
       if (!alive()) return;
-      setFrame(afterComplete);
+      setRichFrame(afterComplete);
       await commit();
     }
 
@@ -295,11 +319,11 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
       }
       await delay(125);
       if (back) {
-        back.style.transform = 'scaleX(0.06)'; // hold the squash across the reveal
+        back.style.transform = 'scaleX(0.06)';
         a1?.cancel();
       }
       work = { ...work, columns: work.columns.map((c, i) => (i === col ? { ...c, faceDown: index } : c)) };
-      setFrame(work);
+      setRichFrame(work);
       await commit();
       if (!alive()) return;
       const front = get(key);
@@ -319,22 +343,22 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
       await delay(60);
     }
     setFlipHi(null);
-    setFrame(cur);
+    setRichFrame(cur);
   }
 
-  const steps = computeSteps(frame);
-  const active = activeCols(move);
+  const rendered = richFrame ?? state;
+  const steps = animSteps ?? computeSteps(rendered);
   const dealing = move?.type === 'deal';
 
   return (
     <div className="board">
       {Array.from({ length: COLS }, (_, c) => {
-        const col = frame.columns[c];
+        const col = rendered.columns[c];
         const tops = columnTops(col, steps);
         const height = (tops.length ? tops[tops.length - 1] : 0) + CARD_H;
 
         return (
-          <div key={c} className={`column${active.has(c) ? ' active' : ''}`} style={{ height }}>
+          <div key={c} className="column" style={{ height }}>
             <div className="col-label">{c}</div>
             {col.cards.length === 0 && <div className="empty-slot" />}
             {col.cards.map((card, i) => {
