@@ -163,25 +163,43 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
   }, [animNonce]);
 
   function quickSlide(prev: GameState, cur: GameState, mv: Move, held: Steps, my: number) {
-    // Hold the overlap steady for the slide. Set from this layout effect, so it's
-    // flushed before the first paint — the cards are already in place (no flash
-    // onto the destination) and won't reflow mid-slide.
+    // Hold the overlap steady for the slide (set from this layout effect, so it's
+    // flushed before the first paint — no reflow mid-slide).
     setAnimSteps(held);
     moveOffsets(prev, cur, mv, held).forEach((d, key) => {
       const el = get(key);
       if (!el) return;
-      el.style.zIndex = '60';
-      const a = el.animate(
-        [{ transform: `translate(${d.dx}px, ${d.dy}px)` }, { transform: 'translate(0, 0)' }],
-        { duration: 190, easing: 'cubic-bezier(0.22, 0.61, 0.36, 1)' },
-      );
-      a.onfinish = () => {
-        el.style.zIndex = '';
-      };
+      slideFromSource(el, d, 190, 'cubic-bezier(0.22, 0.61, 0.36, 1)');
     });
     setTimeout(() => {
       if (token.current === my) setAnimSteps((s) => (s ? null : s)); // un-scrunch after
     }, 230);
+  }
+
+  /**
+   * Play a card sliding in from a `{dx, dy}` offset. The offset is written to the
+   * element's inline transform *synchronously* (in a layout effect, before paint)
+   * so the card is at its source on the very first frame — never flashed onto the
+   * destination — and the Web Animation then carries it to zero.
+   */
+  function slideFromSource(
+    el: HTMLDivElement,
+    d: { dx: number; dy: number },
+    duration: number,
+    easing: string,
+    keyframes?: Keyframe[],
+  ) {
+    el.style.zIndex = '60';
+    el.style.transform = `translate(${d.dx}px, ${d.dy}px)`;
+    const a = el.animate(
+      keyframes ?? [{ transform: `translate(${d.dx}px, ${d.dy}px)` }, { transform: 'translate(0, 0)' }],
+      { duration, easing, fill: 'forwards' },
+    );
+    a.onfinish = () => {
+      el.style.transform = '';
+      el.style.zIndex = '';
+      a.cancel();
+    };
   }
 
   async function runRich(
@@ -238,18 +256,11 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
     moveOffsets(prev, moved, mv, held).forEach((d, key) => {
       const el = get(key);
       if (!el) return;
-      el.style.zIndex = '60';
-      const a = el.animate(
-        [
-          { transform: `translate(${d.dx}px, ${d.dy}px) scale(1.03)`, boxShadow: '0 10px 20px rgba(0,0,0,0.5)', offset: 0 },
-          { transform: `translate(${d.dx * 0.4}px, ${d.dy * 0.4 + 34}px) scale(1.05)`, offset: 0.55 },
-          { transform: 'translate(0, 0) scale(1)', boxShadow: '0 1px 2px rgba(0,0,0,0.35)', offset: 1 },
-        ],
-        { duration: 380, easing: 'cubic-bezier(0.4, 0.02, 0.25, 1)' },
-      );
-      a.onfinish = () => {
-        el.style.zIndex = '';
-      };
+      slideFromSource(el, d, 380, 'cubic-bezier(0.4, 0.02, 0.25, 1)', [
+        { transform: `translate(${d.dx}px, ${d.dy}px) scale(1.03)`, boxShadow: '0 10px 20px rgba(0,0,0,0.5)', offset: 0 },
+        { transform: `translate(${d.dx * 0.4}px, ${d.dy * 0.4 + 34}px) scale(1.05)`, offset: 0.55 },
+        { transform: 'translate(0, 0) scale(1)', boxShadow: '0 1px 2px rgba(0,0,0,0.35)', offset: 1 },
+      ]);
     });
     await delay(400);
     if (!alive()) return;
