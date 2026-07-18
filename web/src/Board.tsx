@@ -54,6 +54,15 @@ type Props = {
   animNonce?: number;
   /** Full multi-phase choreography (Next) vs a quick slide (Play). */
   rich?: boolean;
+  /**
+   * Hold back the newest `n` completed suits from the foundations until their
+   * King has flown up (Phase 3). Called with the count when a completing step's
+   * rich animation starts, and with 0 to reveal all (on settle or any jump), so
+   * the foundation King never appears before the run has vanished.
+   */
+  onHideCompletions?: (n: number) => void;
+  /** One held-back completion's King has landed — reveal it in the foundations. */
+  onRevealCompletion?: () => void;
 };
 
 /**
@@ -124,7 +133,16 @@ export function Foundations({ suits, justCompleted }: { suits: number[]; justCom
   );
 }
 
-export function Board({ state, move, showStock = true, prevState = null, animNonce, rich = true }: Props) {
+export function Board({
+  state,
+  move,
+  showStock = true,
+  prevState = null,
+  animNonce,
+  rich = true,
+  onHideCompletions,
+  onRevealCompletion,
+}: Props) {
   // Normally the board is rendered straight from `state` (so jumps/Play never
   // lag). Only during the multi-phase Next choreography does `richFrame` override
   // it with intermediate frames. `animSteps`, when set, freezes the overlap for a
@@ -151,6 +169,8 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
     setAnimSteps((s) => (s ? null : s));
     setHighlight((h) => (h.size ? new Set() : h));
     setFlipHi((f) => (f ? null : f));
+    onHideCompletions?.(0); // any new state (jump/Play/interrupt) reveals all completed suits
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
 
   // A forward step (Next / Play) animates from `prevState`.
@@ -227,6 +247,9 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
   ) {
     const alive = () => my === token.current;
     setAnimSteps(held);
+    // Hold this step's finished suits out of the foundations until each King flies
+    // up in Phase 3, so the run visibly vanishes before its King appears there.
+    if (anim.completions.length > 0) onHideCompletions?.(anim.completions.length);
     try {
       await playPhases(anim, prev, mv, cur, held, alive, my);
     } catch {
@@ -237,6 +260,7 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
       setFlipHi(null);
       setRichFrame(null);
       setAnimSteps(null); // un-scrunch only now, after the whole animation
+      onHideCompletions?.(0); // safety: everything this step finished is now shown
     }
   }
 
@@ -262,7 +286,7 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
     setRichFrame(prev);
     setHighlight(new Set(sourceKeys));
     await commit();
-    await delay(280);
+    await delay(420); // dwell on the highlighted source so the eye catches it before the move
     if (!alive()) return;
 
     // Phase 2 — move: relocate the cards, then slide them in with a downward dip.
@@ -324,6 +348,8 @@ export function Board({ state, move, showStock = true, prevState = null, animNon
         );
       }
       await delay(380);
+      if (!alive()) return;
+      onRevealCompletion?.(); // King has flown up — now show it in the foundations
     }
     if (completions.length > 0) {
       if (!alive()) return;

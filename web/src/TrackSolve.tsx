@@ -105,6 +105,9 @@ export default function TrackSolve() {
   const [animNonce, setAnimNonce] = useState(0);
   // Next gets the full multi-phase choreography; Play stays a quick slide.
   const [richAnim, setRichAnim] = useState(true);
+  // Newest completed suits held out of the foundations while their run animates
+  // away (the Board reveals them once each King has flown up).
+  const [hiddenCompletions, setHiddenCompletions] = useState(0);
   // The board *before* a manual "Deal a row", so that deal (and any suit it
   // completes) animates on the live board just like a playback step.
   const [dealAnim, setDealAnim] = useState<GameState | null>(null);
@@ -126,6 +129,7 @@ export default function TrackSolve() {
   useEffect(() => {
     setStep(0);
     setPlaying(false);
+    setHiddenCompletions(0);
   }, [planStates]);
 
   /** Advance one move, animating the cards. Used by Next and Play. */
@@ -376,6 +380,12 @@ export default function TrackSolve() {
   const displayState = planStates ? planStates[step] : boardDisplayState(board, deal);
   const lastState = planStates ? planStates[planStates.length - 1] : null;
   const showFoundations = !!planStates && (isSolve || (lastState?.completed ?? 0) > 0);
+  // Suits to actually show in the foundations now: all completed, minus any whose
+  // run is still animating away this step (held back by the Board until the King
+  // lands). Pop the newest only once it's a suit this step actually revealed.
+  const shownCompleted = Math.max(0, displayState.completed - hiddenCompletions);
+  const shownSuits = displayState.completedSuits.slice(0, shownCompleted);
+  const prevCompleted = planStates && step > 0 ? planStates[step - 1].completed : 0;
   const atEnd = !planStates || step >= planStates.length - 1;
   // The board Board animates from: a plan step, or a manual deal on the live board.
   const boardPrev = planStates ? (step > 0 ? planStates[step - 1] : null) : dealAnim;
@@ -625,10 +635,7 @@ export default function TrackSolve() {
         </div>
 
         {showFoundations && lastState && (
-          <Foundations
-            suits={displayState.completedSuits}
-            justCompleted={step > 0 && (planStates![step].completed > planStates![step - 1].completed)}
-          />
+          <Foundations suits={shownSuits} justCompleted={shownCompleted > prevCompleted} />
         )}
 
         <Board
@@ -638,6 +645,8 @@ export default function TrackSolve() {
           prevState={boardPrev}
           animNonce={animNonce}
           rich={richAnim}
+          onHideCompletions={setHiddenCompletions}
+          onRevealCompletion={() => setHiddenCompletions((h) => Math.max(0, h - 1))}
         />
       </main>
     </div>
