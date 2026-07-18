@@ -83,6 +83,79 @@ export function computeStates(init: GameState, moves: Move[]): GameState[] {
   return states;
 }
 
+function isKingRun(cards: Card[]): boolean {
+  if (cards.length !== 13) return false;
+  const suit = cards[0].suit;
+  return cards.every((c, i) => c.rank === 13 - i && c.suit === suit && c.rank !== 0);
+}
+
+/**
+ * A single step (`prev` → `cur` via `move`) decomposed into the frames a rich
+ * playback animation walks through:
+ *   prev → `moved` (cards relocated, nothing flipped/removed)
+ *        → `afterComplete` (a finished K..A run removed, if any)
+ *        → `cur` (face-down cards flipped up, one at a time).
+ */
+export type StepAnim = {
+  /** Board right after the cards physically move — nothing flipped or removed. */
+  moved: GameState;
+  /** Keys ("col-index") of the just-moved cards in `moved` — highlight + slide. */
+  movedKeys: string[];
+  /** Board after a completed run (if any) is removed; else identical to `moved`. */
+  afterComplete: GameState;
+  /** The finished run to animate away, if this move completed a suit. */
+  completion: { col: number; suit: number } | null;
+  /** Face-down cards that turn up, top-first, to flip one at a time. */
+  flips: { col: number; index: number }[];
+};
+
+export function computeStepAnim(prev: GameState, move: Move, cur: GameState): StepAnim {
+  const moved = cloneState(prev);
+  const movedKeys: string[] = [];
+  if (move.type === 'deal') {
+    for (let c = 0; c < COLS; c++) {
+      const card = moved.stock.pop();
+      if (card) {
+        moved.columns[c].cards.push(card);
+        movedKeys.push(`${c}-${moved.columns[c].cards.length - 1}`);
+      }
+    }
+  } else {
+    const from = moved.columns[move.from];
+    const to = moved.columns[move.to];
+    const start = to.cards.length;
+    to.cards.push(...from.cards.splice(from.cards.length - move.count, move.count));
+    for (let k = 0; k < move.count; k++) movedKeys.push(`${move.to}-${start + k}`);
+  }
+
+  // A finished run: the column whose top 13 cards `cur` removed.
+  const afterComplete = cloneState(moved);
+  let completion: { col: number; suit: number } | null = null;
+  if (cur.completed > prev.completed) {
+    for (let c = 0; c < COLS; c++) {
+      const col = afterComplete.columns[c].cards;
+      if (isKingRun(col.slice(col.length - 13))) {
+        const suit = col[col.length - 13].suit;
+        col.length -= 13;
+        afterComplete.completed++;
+        afterComplete.completedSuits.push(suit);
+        completion = { col: c, suit };
+        break; // one run per step is the norm; extras just skip the flourish
+      }
+    }
+  }
+
+  // Face-down cards that flip up (source uncovered, or a completion uncovered),
+  // topmost first so they turn over from the top of the pile down.
+  const flips: { col: number; index: number }[] = [];
+  for (let c = 0; c < COLS; c++) {
+    for (let i = prev.columns[c].faceDown - 1; i >= cur.columns[c].faceDown; i--) {
+      flips.push({ col: c, index: i });
+    }
+  }
+  return { moved, movedKeys, afterComplete, completion, flips };
+}
+
 const RANK_NAMES = ['', 'A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
 const SUIT_SYMBOLS = ['♠', '♥', '♣', '♦']; // ♠ ♥ ♣ ♦
 

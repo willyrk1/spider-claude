@@ -101,6 +101,8 @@ export default function TrackSolve() {
   // Bumped on each *forward* step so the board animates the moved cards.
   // Back/jump/click leave it unchanged, so those update instantly.
   const [animNonce, setAnimNonce] = useState(0);
+  // Next gets the full multi-phase choreography; Play stays a quick slide.
+  const [richAnim, setRichAnim] = useState(true);
 
   // A plan is shown (and steppable) once we have moves — immediately for a
   // solution or a shallow reveal; a deep plan waits for the user to confirm.
@@ -166,7 +168,10 @@ export default function TrackSolve() {
       setPlaying(false);
       return;
     }
-    const id = setTimeout(advance, 300);
+    const id = setTimeout(() => {
+      setRichAnim(false); // Play: quick slide, not the full choreography
+      advance();
+    }, 340);
     return () => clearTimeout(id);
   }, [playing, step, planStates]);
 
@@ -516,6 +521,7 @@ export default function TrackSolve() {
                   <button
                     onClick={() => {
                       setPlaying(false);
+                      setRichAnim(true);
                       advance();
                     }}
                     disabled={atEnd}
@@ -620,6 +626,7 @@ export default function TrackSolve() {
           showStock={false}
           prevState={planStates && step > 0 ? planStates[step - 1] : null}
           animNonce={animNonce}
+          rich={richAnim}
         />
       </main>
     </div>
