@@ -166,7 +166,18 @@ export default function TrackSolve() {
 
   // When only one card is left unknown, deduce it — you never need to uncover
   // the last card (it's whatever is missing from everything else you entered).
+  // Not while the pre-fill editor is open: there you may be deliberately clearing
+  // a card you suspect is wrong, and auto-filling it back would defeat that (and
+  // hide it from the solver's drill-back guidance). `prefillOpen` is intentionally
+  // left out of the deps so closing the editor doesn't re-deduce the blank you
+  // left — it only resumes once you change a card during normal play.
   useEffect(() => {
+    // Drop a stale "deduced" note the moment the deck stops being fully known
+    // (e.g. you cleared a card you suspect is wrong in the editor).
+    const anyUnknown =
+      deal.tableau.some((c) => c.some((x) => x === null)) || deal.stock.some((x) => x === null);
+    if (anyUnknown) setDeduced(null);
+    if (prefillOpen) return;
     const card = deduceLastUnknown(deal, suits);
     if (card) {
       setDeal((d) => fillOnlyUnknown(d, card));
