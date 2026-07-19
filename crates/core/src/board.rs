@@ -244,6 +244,53 @@ impl Board {
             || self.stock.iter().any(|&c| is_unknown(c))
     }
 
+    /// The multiset of cards absent from the board — i.e. what the UNKNOWN cells
+    /// *must* be, deduced by counting: a `suits`-suit shoe holds every in-suit
+    /// card `8 / suits` times, so anything short is missing. When the number of
+    /// UNKNOWN cells equals this list's length, the unknowns are pinned to this
+    /// exact multiset (only their arrangement is open). Returns cards in a stable
+    /// order (rank then suit).
+    pub fn missing_cards(&self, suits: u8) -> Vec<Card> {
+        let copies = if matches!(suits, 1 | 2 | 4) { 8 / suits } else { 0 };
+        let mut counts = [[0u32; 4]; 14];
+        for &card in self.cols.iter().flatten().chain(self.stock.iter()) {
+            if !is_unknown(card) {
+                let (r, s) = (rank(card) as usize, suit(card) as usize);
+                if (1..=13).contains(&r) && s < 4 {
+                    counts[r][s] += 1;
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for r in 1..=13u8 {
+            for s in 0..suits {
+                let have = counts[r as usize][s as usize];
+                for _ in have..copies as u32 {
+                    out.push(make_card(r, s));
+                }
+            }
+        }
+        out
+    }
+
+    /// `(column, index)` of every UNKNOWN cell in the tableau, in a stable order.
+    pub fn unknown_tableau_slots(&self) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for c in 0..COLS {
+            for (i, &card) in self.cols[c].iter().enumerate() {
+                if is_unknown(card) {
+                    out.push((c, i));
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether any undealt stock card is still unknown.
+    pub fn stock_has_unknown(&self) -> bool {
+        self.stock.iter().any(|&c| is_unknown(c))
+    }
+
     /// Total face-down (unknown) cards remaining — the advisor tries to reduce it.
     pub fn face_down_total(&self) -> u32 {
         self.face_down.iter().map(|&f| f as u32).sum()

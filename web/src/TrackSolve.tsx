@@ -2,14 +2,22 @@ import { useEffect, useMemo, useState } from 'react';
 import { Board, Foundations } from './Board';
 import PreFill from './PreFill';
 import {
-  cancelJob,
-  plan,
-  pollJob,
-  startRevealJob,
-  startSolveJob,
-  type JobKind,
+  cancelPlanJob,
+  pollPlanJob,
+  startPlanJob,
+  type FillCard,
   type PlanResponse,
+  type PlanStage,
 } from './api';
+
+/** What the search is doing right now, for the progress panel. */
+const STAGE_LABEL: Record<PlanStage, string> = {
+  '': 'Starting the search…',
+  quick: 'Looking for a quick reveal…',
+  deep: 'Searching deeper for a reveal…',
+  deduce: 'Deducing the last cards and solving…',
+  solve: 'Searching for a solution…',
+};
 import {
   boardDisplayState,
   boardToDisplayState,
@@ -96,11 +104,11 @@ export default function TrackSolve() {
   const [resp, setResp] = useState<PlanResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Long searches run as a background job the UI polls (with a Cancel). Both the
-  // full solve and the deep reveal search use this same machinery; `jobKind`
-  // tracks which so we poll/cancel the right endpoint and label it correctly.
-  const [solveJob, setSolveJob] = useState<number | null>(null);
-  const [jobKind, setJobKind] = useState<JobKind>('solve');
+  // The search runs as one staged background job the UI polls (with a Cancel).
+  // `jobStage` is the stage the server reports it's currently in, so we can label
+  // what's happening and let the user bail out of any of it.
+  const [jobId, setJobId] = useState<number | null>(null);
+  const [jobStage, setJobStage] = useState<PlanStage>('');
   const [jobProgress, setJobProgress] = useState<{ nodes: number; elapsedMs: number } | null>(null);
   const [drafts, setDrafts] = useState<Record<number, string>>({});
   const [sessionText, setSessionText] = useState('');
@@ -283,99 +291,87 @@ export default function TrackSolve() {
     setResp(null);
   }
 
+  /**
+   * Start the one staged plan search and poll it. The server escalates quick
+   * reveal → deep reveal → deduce-and-solve (or straight to a solve when the deck
+   * is fully known) on its own; the UI just shows the stage and a Cancel.
+   */
   async function onPlan() {
     if (unfilled) {
       setError('Fill in the revealed (?) cards first.');
       return;
     }
-    setLoading(true);
     setError(null);
+    setResp(null);
     setDeepConfirmed(false);
+    setLoading(true);
     try {
-      const r = await plan({
+      const id = await startPlanJob({
         suits,
         columns: planColumns(board, deal),
         stock: planStock(board, deal),
         allow_deal_with_empty: ALLOW_DEAL_WITH_EMPTY_COLUMNS,
       });
-      setResp(r);
+      setJobStage('');
+      setJobProgress({ nodes: 0, elapsedMs: 0 });
+      setJobId(id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-      setResp(null);
     } finally {
       setLoading(false);
     }
   }
 
-  /** Start a background solve of the fully-known board and poll it. */
-  async function onSolveJob() {
-    setError(null);
-    setResp(null);
-    const params = {
-      suits,
-      columns: planColumns(board, deal),
-      stock: planStock(board, deal),
-      allow_deal_with_empty: ALLOW_DEAL_WITH_EMPTY_COLUMNS,
-    };
-    try {
-      setJobKind('solve');
-      const id = await startSolveJob(params);
-      setJobProgress({ nodes: 0, elapsedMs: 0 });
-      setSolveJob(id);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+  /** Lock in the deduced hidden cards so the winning line replays on a full deck. */
+  function applyFills(fills: FillCard[]) {
+    setDeal((d) => {
+      const nd: InitialDeal = { tableau: d.tableau.map((t) => t.slice()), stock: d.stock.slice() };
+      for (const f of fills) {
+        const origin = board.columns[f.col]?.cards[f.index];
+        if (!origin) continue;
+        const card = { rank: f.rank, suit: f.suit };
+        if (origin.src === 't') nd.tableau[origin.col][origin.pos] = card;
+        else nd.stock[origin.idx] = card;
+      }
+      return nd;
+    });
   }
 
-  /** Start the deep reveal search as a background job (cancellable, polled). */
-  async function onRevealDeep() {
-    setError(null);
-    setDeepConfirmed(false);
-    setResp(null); // hide the "stuck" banner; the progress panel takes over
-    const params = {
-      suits,
-      columns: planColumns(board, deal),
-      stock: planStock(board, deal),
-      allow_deal_with_empty: ALLOW_DEAL_WITH_EMPTY_COLUMNS,
-    };
-    try {
-      setJobKind('reveal');
-      const id = await startRevealJob(params);
-      setJobProgress({ nodes: 0, elapsedMs: 0 });
-      setSolveJob(id);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  function cancelSolve() {
-    if (solveJob !== null) cancelJob(jobKind, solveJob);
-    setSolveJob(null);
+  // A single Cancel stops whatever stage is running and doesn't advance.
+  function cancelSearch() {
+    if (jobId !== null) cancelPlanJob(jobId);
+    setJobId(null);
     setJobProgress(null);
   }
 
-  // Poll the running solve job ~1×/s (which also renews its server-side lease).
+  // Poll the running plan job ~1×/s (which also renews its server-side lease).
   useEffect(() => {
-    if (solveJob === null) return;
+    if (jobId === null) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     const tick = async () => {
       try {
-        const s = await pollJob(jobKind, solveJob);
+        const s = await pollPlanJob(jobId);
         if (stopped) return;
         if (!s) {
-          setSolveJob(null);
+          setJobId(null);
           setJobProgress(null);
           setError('The search was dropped (server restarted or it timed out). Try again.');
           return;
         }
+        setJobStage(s.stage);
         setJobProgress({ nodes: s.nodes, elapsedMs: s.elapsed_ms });
         if (s.status === 'done') {
-          setSolveJob(null);
+          setJobId(null);
           setJobProgress(null);
-          if (s.result) setResp(s.result);
+          if (s.result) {
+            // A deduced solve tells us the hidden cards — fill them so the
+            // winning line replays on the now-complete deck.
+            if (s.result.fill?.length) applyFills(s.result.fill);
+            setResp(s.result);
+          }
         } else if (s.status === 'cancelled') {
-          setSolveJob(null);
+          setJobId(null);
           setJobProgress(null);
         } else {
           timer = setTimeout(tick, 1000);
@@ -389,13 +385,16 @@ export default function TrackSolve() {
       stopped = true;
       clearTimeout(timer);
     };
-  }, [solveJob, jobKind]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId]);
 
   // If the board changes under a running job, its result is stale — cancel it.
+  // (Applying deduced fills changes the board too, but the job is already done by
+  // then, so the `jobId !== null` guard makes this a no-op in that case.)
   useEffect(() => {
-    if (solveJob !== null) {
-      cancelJob(jobKind, solveJob);
-      setSolveJob(null);
+    if (jobId !== null) {
+      cancelPlanJob(jobId);
+      setJobId(null);
       setJobProgress(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -460,13 +459,11 @@ export default function TrackSolve() {
         <div className="controls">
           <button
             className="primary big"
-            onClick={() => (fullyKnown(board, deal) ? onSolveJob() : onPlan())}
-            disabled={loading || unfilled || solveJob !== null}
+            onClick={onPlan}
+            disabled={loading || unfilled || jobId !== null}
           >
-            {solveJob !== null
-              ? jobKind === 'reveal'
-                ? 'Searching…'
-                : 'Solving…'
+            {jobId !== null
+              ? 'Searching…'
               : loading
                 ? 'Thinking…'
                 : fullyKnown(board, deal)
@@ -514,11 +511,11 @@ export default function TrackSolve() {
           </button>
         </div>
 
-        {solveJob !== null && (
+        {jobId !== null && (
           <div className="banner good solving">
             <div className="solving-head">
               <span className="spinner" />
-              <b>{jobKind === 'reveal' ? 'Searching deeper for a reveal…' : 'Searching for a solution…'}</b>
+              <b>{STAGE_LABEL[jobStage]}</b>
             </div>
             <div className="solve-progress">
               {jobProgress
@@ -526,11 +523,10 @@ export default function TrackSolve() {
                 : 'starting…'}
             </div>
             <p className="hint" style={{ margin: '4px 0 8px' }}>
-              {jobKind === 'reveal'
-                ? 'Digs for a way to uncover a card. Deep lines can take a while, or come up empty.'
-                : 'Runs until it finds a line or you cancel. Hard deals can take minutes.'}
+              It escalates on its own — quick reveal, then a deeper search, then
+              deducing the last cards. Cancel any time to stop where it is.
             </p>
-            <button onClick={cancelSolve}>Cancel search</button>
+            <button onClick={cancelSearch}>Cancel search</button>
           </div>
         )}
 
@@ -570,14 +566,6 @@ export default function TrackSolve() {
               {resp.note}
               {isSolve && resp.verified ? ' ✓ verified' : ''}
             </div>
-
-            {/* Normal search came up empty — offer the slower, deeper search,
-                which runs as a cancellable background job with progress. */}
-            {resp.phase === 'stuck' && !resp.deep && (
-              <button className="primary" onClick={onRevealDeep}>
-                🔎 Search deeper (slow)
-              </button>
-            )}
 
             {/* Deep plan found — confirm before showing/stepping it. */}
             {resp.moves.length > 0 && resp.deep && !deepConfirmed && (

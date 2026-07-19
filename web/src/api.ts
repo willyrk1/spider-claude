@@ -1,8 +1,11 @@
 import type { Move } from './game';
 
-// Each card in a /plan request is a card object or null (still unknown).
+// Each card in a plan request is a card object or null (still unknown).
 export type PlanCard = { rank: number; suit: number } | null;
 export type PlanColumn = { face_down: number; cards: PlanCard[] };
+
+/** A deduced hidden card and where it sits on the current board. */
+export type FillCard = { col: number; index: number; rank: number; suit: number };
 
 export type PlanResponse = {
   phase: 'discover' | 'solve' | 'stuck';
@@ -12,8 +15,10 @@ export type PlanResponse = {
   verified?: boolean;
   winning_config?: { weight: number; fdw: number };
   nodes_searched?: number;
-  /** True when this plan came from the opt-in deep search (may be very long). */
+  /** True when this plan came from a deep search (may be very long). */
   deep?: boolean;
+  /** For a deduce-and-solve result: hidden cards to fill in before the moves replay. */
+  fill?: FillCard[];
 };
 
 export type PlanParams = {
@@ -36,48 +41,39 @@ async function postJson(url: string, body: unknown) {
   return res.json();
 }
 
-/** POST /plan — discover more cards, or (once all known) the full solution. */
-export function plan(params: PlanParams): Promise<PlanResponse> {
-  return postJson('/api/plan', params);
-}
-
-// ---- Async jobs (long, cancellable, polled) ----
+// ---- The unified plan job (long, staged, cancellable, polled) ----
 //
-// Two kinds share the same job machinery on the server (poll/cancel/heartbeat/
-// reaper): a full solve of a known board, and a deep reveal search on a
-// partially-known one. They start at different endpoints but poll/cancel the
-// same way, keyed by `kind`.
+// One background job escalates through the searches automatically — quick reveal
+// → deep reveal → deduce-and-solve, or straight to a solve when the board is
+// fully known — reporting which `stage` it's in and its node progress, and
+// stoppable at any point.
 
-export type JobKind = 'solve' | 'reveal';
+/** Which stage the plan job is (or was last) running. */
+export type PlanStage = 'quick' | 'deep' | 'deduce' | 'solve' | '';
 
-export type SolveJobStatus = {
+export type PlanJobStatus = {
   status: 'running' | 'done' | 'cancelled';
+  stage: PlanStage;
   nodes: number;
   elapsed_ms: number;
   result?: PlanResponse;
 };
 
-/** POST /solve/jobs — kick off a background solve of a fully-known board. */
-export async function startSolveJob(params: PlanParams): Promise<number> {
-  const { job_id } = await postJson('/api/solve/jobs', params);
+/** POST /plan/jobs — kick off the staged plan search. */
+export async function startPlanJob(params: PlanParams): Promise<number> {
+  const { job_id } = await postJson('/api/plan/jobs', params);
   return job_id;
 }
 
-/** POST /reveal/jobs — kick off a background deep reveal search. */
-export async function startRevealJob(params: PlanParams): Promise<number> {
-  const { job_id } = await postJson('/api/reveal/jobs', params);
-  return job_id;
-}
-
-/** GET /{kind}/jobs/:id — poll a job (also renews its lease/heartbeat). */
-export async function pollJob(kind: JobKind, id: number): Promise<SolveJobStatus | null> {
-  const res = await fetch(`/api/${kind}/jobs/${id}`);
+/** GET /plan/jobs/:id — poll the job (also renews its lease/heartbeat). */
+export async function pollPlanJob(id: number): Promise<PlanJobStatus | null> {
+  const res = await fetch(`/api/plan/jobs/${id}`);
   if (res.status === 404) return null; // reaped or unknown
   if (!res.ok) throw new Error(`API ${res.status}`);
   return res.json();
 }
 
-/** DELETE /{kind}/jobs/:id — cancel a running job. */
-export async function cancelJob(kind: JobKind, id: number): Promise<void> {
-  await fetch(`/api/${kind}/jobs/${id}`, { method: 'DELETE' }).catch(() => {});
+/** DELETE /plan/jobs/:id — cancel the running job. */
+export async function cancelPlanJob(id: number): Promise<void> {
+  await fetch(`/api/plan/jobs/${id}`, { method: 'DELETE' }).catch(() => {});
 }

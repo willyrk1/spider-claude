@@ -22,8 +22,8 @@ use axum::{http::StatusCode, routing::get, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 
 use spider_core::board::{Board, Move};
-use spider_core::card::{make_card, rank, suit, Card, UNKNOWN};
-use spider_core::solver::{self, Advice, SolveResult, Solver};
+use spider_core::card::{self, make_card, rank, suit, Card, UNKNOWN};
+use spider_core::solver::{self, Advice, DeducedOutcome, SolveResult, Solver};
 
 #[tokio::main]
 async fn main() {
@@ -37,14 +37,11 @@ async fn main() {
         .route("/health", get(|| async { "ok" }))
         .route("/solve", post(solve))
         .route("/advise", post(advise))
-        .route("/plan", post(plan))
-        // Long, cancellable solve as a background job the UI polls.
-        .route("/solve/jobs", post(solve_job_start))
-        .route("/solve/jobs/:id", get(solve_job_poll).delete(solve_job_cancel))
-        // The deep reveal search is just as long and cancellable, so it runs as
-        // the same kind of job; poll/cancel are shared with the solve jobs.
-        .route("/reveal/jobs", post(reveal_job_start))
-        .route("/reveal/jobs/:id", get(solve_job_poll).delete(solve_job_cancel))
+        // The unified, staged plan search: one cancellable background job that
+        // escalates quick reveal → deep reveal → deduce-and-solve (or straight to
+        // a solve when the board is fully known). The UI polls it.
+        .route("/plan/jobs", post(plan_job_start))
+        .route("/plan/jobs/:id", get(solve_job_poll).delete(solve_job_cancel))
         .with_state(state);
 
     // Bind address defaults to localhost:3000; override with SPIDER_API_ADDR
@@ -69,6 +66,10 @@ async fn main() {
 /// "until cancelled" gets a generous hard ceiling per config (empirically safe
 /// on commodity RAM; a hard deal reaches this in a handful of minutes).
 const SOLVE_JOB_NODES: u64 = 300_000_000;
+/// Most distinct arrangements of the deduced cards the deduce-and-solve stage
+/// will try. Small: this is for the tail of a game (a couple of unreachable
+/// cards), not mid-play ambiguity.
+const MAX_DEDUCE_PERMS: usize = 4;
 /// Cancel a job the UI hasn't polled within this long.
 const JOB_LEASE: Duration = Duration::from_secs(15);
 /// Keep a finished/cancelled job around this long so a final poll can read it.
@@ -77,6 +78,7 @@ const JOB_RETAIN: Duration = Duration::from_secs(60);
 struct Job {
     stop: Arc<AtomicBool>,
     progress: Arc<AtomicU64>, // running node total, for the poller
+    stage: Mutex<&'static str>, // which pipeline stage is running (for the poller)
     started: Instant,
     last_seen: Mutex<Instant>,       // renewed on each poll (the heartbeat)
     finished: Mutex<Option<Instant>>, // set when done or cancelled
@@ -99,30 +101,37 @@ struct JobStarted {
 struct JobStatus {
     /// "running", "done", or "cancelled".
     status: &'static str,
+    /// Which pipeline stage is (or was last) running: "quick", "deep", "deduce",
+    /// or "solve". Lets the UI show what the search is doing right now.
+    stage: &'static str,
     nodes: u64,
     elapsed_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<PlanResponse>,
 }
 
-async fn solve_job_start(
+/// Start the unified, staged *plan* job. One background worker escalates through
+/// the searches automatically — quick reveal → deep reveal → deduce-and-solve
+/// (partial boards), or straight to a solve (fully-known boards) — updating its
+/// `stage` and node `progress` as it goes, and stoppable at any point via the
+/// shared job machinery (poll/cancel/heartbeat/reaper).
+async fn plan_job_start(
     State(state): State<AppState>,
     Json(req): Json<PlanRequest>,
 ) -> Result<Json<JobStarted>, (StatusCode, String)> {
     let board = board_from_plan(&req)?;
-    if board.has_unknowns() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "board still has unknown cards — fill them in before solving".into(),
-        ));
+    // A fully-known board must be a legal deck before we spend a budget on it.
+    if !board.has_unknowns() {
+        board
+            .check_deck_legal(req.suits)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     }
-    board
-        .check_deck_legal(req.suits)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let suits = req.suits;
 
     let job = Arc::new(Job {
         stop: Arc::new(AtomicBool::new(false)),
         progress: Arc::new(AtomicU64::new(0)),
+        stage: Mutex::new(""),
         started: Instant::now(),
         last_seen: Mutex::new(Instant::now()),
         finished: Mutex::new(None),
@@ -132,95 +141,204 @@ async fn solve_job_start(
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
     state.jobs.lock().unwrap().insert(id, Arc::clone(&job));
 
-    // The solve is blocking and spawns its own worker threads, so give it its
-    // own OS thread rather than a runtime task.
+    // The searches are blocking and spawn their own worker threads, so give the
+    // pipeline its own OS thread rather than a runtime task.
     std::thread::spawn(move || {
+        let resp = run_plan_pipeline(&board, suits, &job);
+        *job.result.lock().unwrap() = Some(resp);
+        *job.finished.lock().unwrap() = Some(Instant::now());
+    });
+
+    Ok(Json(JobStarted { job_id: id }))
+}
+
+/// The staged search pipeline (runs on the job's worker thread). Each stage sets
+/// `job.stage` and resets `job.progress`, and checks `job.stop` between stages so
+/// a cancel stops promptly and never advances to the next stage.
+fn run_plan_pipeline(board: &Board, suits: u8, job: &Job) -> PlanResponse {
+    let enter = |stage: &'static str| {
+        *job.stage.lock().unwrap() = stage;
+        job.progress.store(0, Ordering::Relaxed);
+    };
+    let cancelled = || job.stop.load(Ordering::Relaxed);
+
+    // Fully known → just solve.
+    if !board.has_unknowns() {
+        enter("solve");
         let result = Solver::solve_portfolio_tracked(
-            &board,
+            board,
             SOLVE_JOB_NODES,
             solver::DEFAULT_PORTFOLIO,
             &job.stop,
             &job.progress,
         );
-        *job.result.lock().unwrap() = Some(solve_response(&board, result));
-        *job.finished.lock().unwrap() = Some(Instant::now());
-    });
-
-    Ok(Json(JobStarted { job_id: id }))
-}
-
-/// Start a background deep *reveal* search on a partially-known board. Same job
-/// machinery (poll/cancel/heartbeat/reaper) as a solve — the deep search can run
-/// as long, and is now cancellable and progress-reporting via `advise_deep_tracked`.
-async fn reveal_job_start(
-    State(state): State<AppState>,
-    Json(req): Json<PlanRequest>,
-) -> Result<Json<JobStarted>, (StatusCode, String)> {
-    let board = board_from_plan(&req)?;
-    if !board.has_unknowns() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "board is fully known — there is nothing to reveal".into(),
-        ));
+        return solve_response(board, result);
     }
 
-    let job = Arc::new(Job {
-        stop: Arc::new(AtomicBool::new(false)),
-        progress: Arc::new(AtomicU64::new(0)),
-        started: Instant::now(),
-        last_seen: Mutex::new(Instant::now()),
-        finished: Mutex::new(None),
-        result: Mutex::new(None),
-        cancelled: AtomicBool::new(false),
-    });
-    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    state.jobs.lock().unwrap().insert(id, Arc::clone(&job));
+    // Partial board — hunt for a reveal, quickest first.
+    enter("quick");
+    let quick = Solver::advise(board, default_advise_nodes());
+    if !quick.moves.is_empty() {
+        return discover_response(quick, false);
+    }
+    if cancelled() {
+        return stuck_response();
+    }
 
-    std::thread::spawn(move || {
-        let advice = Solver::advise_deep_tracked(
-            &board,
-            default_deep_nodes(),
-            default_deep_depth(),
-            &job.stop,
-            &job.progress,
-        );
-        *job.result.lock().unwrap() = Some(reveal_response(advice));
-        *job.finished.lock().unwrap() = Some(Instant::now());
-    });
+    enter("deep");
+    let deep = Solver::advise_deep_tracked(
+        board,
+        default_deep_nodes(),
+        default_deep_depth(),
+        &job.stop,
+        &job.progress,
+    );
+    if !deep.moves.is_empty() {
+        return discover_response(deep, true);
+    }
+    if cancelled() {
+        return stuck_response();
+    }
 
-    Ok(Json(JobStarted { job_id: id }))
+    // No reveal exists. If the remaining unknowns are pinned down by the deck,
+    // fill them in every possible way and solve — turning "stuck" into a real
+    // answer (a winning line, or a definitive "no win").
+    enter("deduce");
+    match Solver::solve_deduced(
+        board,
+        suits,
+        SOLVE_JOB_NODES,
+        &job.stop,
+        &job.progress,
+        MAX_DEDUCE_PERMS,
+    ) {
+        DeducedOutcome::Solved { moves, fills } => deduced_solve_response(board, suits, moves, fills),
+        DeducedOutcome::NoWin { tried, converged } => deduced_nowin_response(board, suits, tried, converged),
+        // Cancelled, or too ambiguous to deduce — report the reveal dead end.
+        DeducedOutcome::NotDeducible => stuck_response(),
+    }
 }
 
-/// Turn a deep-reveal `Advice` into the `PlanResponse` the UI already renders for
-/// the `deep` discovery path (mirrors the note the synchronous path used).
-fn reveal_response(advice: Advice) -> PlanResponse {
-    let deals = advice.moves.iter().filter(|m| matches!(m, Move::Deal)).count();
-    if advice.moves.is_empty() {
-        return PlanResponse {
-            phase: "stuck".to_string(),
-            note: "Even a deep search found no way to reveal a card within its budget — this line is very likely a dead end. Use ↶ Undo to back up and try a different one.".to_string(),
-            moves: Vec::new(),
-            uncovers: Some(0),
-            verified: None,
-            winning_config: None,
-            nodes_searched: None,
-            deep: Some(true),
-        };
-    }
+/// A partial board where the reveal search found nothing and we couldn't deduce.
+fn stuck_response() -> PlanResponse {
     PlanResponse {
-        phase: "discover".to_string(),
-        note: format!(
+        phase: "stuck".to_string(),
+        note: "No search could reveal a hidden card, and the remaining unknowns aren't pinned down enough to deduce. Use ↶ Undo to back up and try a different line.".to_string(),
+        moves: Vec::new(),
+        uncovers: Some(0),
+        verified: None,
+        winning_config: None,
+        nodes_searched: None,
+        deep: Some(true),
+        fill: None,
+    }
+}
+
+/// A reveal plan (`quick` = the fast search, else the deep one) → the discover
+/// `PlanResponse` the UI renders.
+fn discover_response(advice: Advice, deep: bool) -> PlanResponse {
+    let deals = advice.moves.iter().filter(|m| matches!(m, Move::Deal)).count();
+    let note = if deep {
+        format!(
             "Deep search: a {}-move line ({}) reveals {} unknown card(s) — but it's a long, committal maneuver. Review it before playing it out.",
             advice.moves.len(),
             if deals == 1 { "1 deal".to_string() } else { format!("{deals} deals") },
             advice.uncovers
-        ),
+        )
+    } else if advice.moves.len() == 1 && deals == 1 {
+        "No move uncovers an unknown card — deal a row from the stock, then fill in any newly dealt cards.".to_string()
+    } else if deals > 0 {
+        format!(
+            "Play {} step(s) — including {} — to reveal {} unknown card(s), then fill them in.",
+            advice.moves.len(),
+            if deals == 1 { "a deal".to_string() } else { format!("{deals} deals") },
+            advice.uncovers
+        )
+    } else {
+        format!(
+            "Play {} move(s) to reveal {} unknown card(s), then fill them in and continue.",
+            advice.moves.len(),
+            advice.uncovers
+        )
+    };
+    PlanResponse {
+        phase: "discover".to_string(),
+        note,
         moves: advice.moves.iter().map(move_dto).collect(),
         uncovers: Some(advice.uncovers),
         verified: None,
         winning_config: None,
         nodes_searched: None,
+        deep: if deep { Some(true) } else { None },
+        fill: None,
+    }
+}
+
+/// Comma-list the deduced cards (e.g. "9♣ and K♦") for the notes below.
+fn deduced_card_list(board: &Board, suits: u8) -> String {
+    let names: Vec<String> = board.missing_cards(suits).iter().map(|&c| card::name(c)).collect();
+    match names.len() {
+        0 => String::new(),
+        1 => names[0].clone(),
+        2 => format!("{} and {}", names[0], names[1]),
+        _ => {
+            let (last, rest) = names.split_last().unwrap();
+            format!("{}, and {}", rest.join(", "), last)
+        }
+    }
+}
+
+/// A deduce-and-solve win: the deck forced the hidden cards, and one arrangement
+/// wins. Return the winning line plus the `fill` the UI applies to lock in those
+/// cards (so the line replays on a now-complete board).
+fn deduced_solve_response(board: &Board, suits: u8, moves: Vec<Move>, fills: Vec<(usize, usize, Card)>) -> PlanResponse {
+    // Verify by replaying on the filled board.
+    let mut check = board.clone();
+    for &(c, i, card) in &fills {
+        check.cols[c][i] = card;
+    }
+    for &m in &moves {
+        check.make(m);
+    }
+    let fill: Vec<FillDto> = fills
+        .iter()
+        .map(|&(col, index, card)| FillDto { col, index, rank: rank(card), suit: suit(card) })
+        .collect();
+    PlanResponse {
+        phase: "solve".to_string(),
+        note: format!(
+            "The last hidden card(s) can only be {}. Filled in, this deal is winnable in {} moves.",
+            deduced_card_list(board, suits),
+            moves.len()
+        ),
+        moves: moves.iter().map(move_dto).collect(),
+        uncovers: None,
+        verified: Some(check.is_won()),
+        winning_config: None,
+        nodes_searched: None,
+        deep: None,
+        fill: Some(fill),
+    }
+}
+
+/// Deduce-and-solve exhausted every arrangement without a win.
+fn deduced_nowin_response(board: &Board, suits: u8, tried: usize, converged: bool) -> PlanResponse {
+    let cards = deduced_card_list(board, suits);
+    let note = if converged {
+        format!("The last hidden card(s) can only be {cards}, but no arrangement of them can be won — this position is lost.")
+    } else {
+        format!("The last hidden card(s) can only be {cards}; no win was found for any of the {tried} arrangement(s) within the search budget.")
+    };
+    PlanResponse {
+        phase: "stuck".to_string(),
+        note,
+        moves: Vec::new(),
+        uncovers: Some(0),
+        verified: None,
+        winning_config: None,
+        nodes_searched: None,
         deep: Some(true),
+        fill: None,
     }
 }
 
@@ -234,6 +352,7 @@ async fn solve_job_poll(
 
     let nodes = job.progress.load(Ordering::Relaxed);
     let elapsed_ms = job.started.elapsed().as_millis() as u64;
+    let stage = *job.stage.lock().unwrap();
     let (status, result) = if job.cancelled.load(Ordering::Relaxed) {
         ("cancelled", None)
     } else if let Some(r) = job.result.lock().unwrap().clone() {
@@ -241,7 +360,7 @@ async fn solve_job_poll(
     } else {
         ("running", None)
     };
-    Ok(Json(JobStatus { status, nodes, elapsed_ms, result }))
+    Ok(Json(JobStatus { status, stage, nodes, elapsed_ms, result }))
 }
 
 async fn solve_job_cancel(State(state): State<AppState>, Path(id): Path<u64>) -> StatusCode {
@@ -328,6 +447,7 @@ fn solve_response(board: &Board, result: SolveResult) -> PlanResponse {
                 winning_config: result.winning_config.map(|(weight, fdw)| ConfigDto { weight, fdw }),
                 nodes_searched: Some(result.nodes),
                 deep: None,
+                fill: None,
             }
         }
         None => PlanResponse {
@@ -342,6 +462,7 @@ fn solve_response(board: &Board, result: SolveResult) -> PlanResponse {
             winning_config: None,
             nodes_searched: Some(result.nodes),
             deep: None,
+            fill: None,
         },
     }
 }
@@ -646,10 +767,6 @@ struct PlanRequest {
     columns: Vec<PlanColumn>,
     #[serde(default)]
     stock: Vec<Option<CardInput>>,
-    #[serde(default = "default_advise_nodes")]
-    advise_nodes: u64,
-    #[serde(default = "default_nodes")]
-    solve_nodes: u64,
     /// Rule variant: allow dealing a new row while columns are empty (default
     /// false — the standard rule forbids it).
     #[serde(default)]
@@ -686,10 +803,24 @@ struct PlanResponse {
     winning_config: Option<ConfigDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     nodes_searched: Option<u64>,
-    /// True when this plan came from the opt-in deep search — the client should
-    /// warn (and confirm) before using it, since it may be very long.
+    /// True when this plan came from a deep search — the client should warn (and
+    /// confirm) before using it, since it may be very long.
     #[serde(skip_serializing_if = "Option::is_none")]
     deep: Option<bool>,
+    /// For a deduce-and-solve result: the hidden cards the deck forced, as
+    /// `(col, index)` positions on the current board. The client fills these in
+    /// (completing the deck) so the winning `moves` replay correctly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fill: Option<Vec<FillDto>>,
+}
+
+/// One deduced hidden card and where it sits on the current board.
+#[derive(Serialize, Clone)]
+struct FillDto {
+    col: usize,
+    index: usize,
+    rank: u8,
+    suit: u8,
 }
 
 fn to_card(c: &Option<CardInput>, suits: u8) -> Result<Card, String> {
@@ -704,126 +835,5 @@ fn to_card(c: &Option<CardInput>, suits: u8) -> Result<Card, String> {
             }
             Ok(make_card(ci.rank, ci.suit))
         }
-    }
-}
-
-async fn plan(Json(req): Json<PlanRequest>) -> Result<Json<PlanResponse>, (StatusCode, String)> {
-    if !matches!(req.suits, 1 | 2 | 4) {
-        return Err((StatusCode::BAD_REQUEST, "suits must be 1, 2, or 4".into()));
-    }
-    if req.columns.len() != 10 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("expected 10 columns, got {}", req.columns.len()),
-        ));
-    }
-
-    let mut columns: Vec<(u8, Vec<Card>)> = Vec::with_capacity(10);
-    for (i, col) in req.columns.iter().enumerate() {
-        let mut cards = Vec::with_capacity(col.cards.len());
-        for c in &col.cards {
-            cards.push(to_card(c, req.suits).map_err(|e| (StatusCode::BAD_REQUEST, format!("column {i}: {e}")))?);
-        }
-        columns.push((col.face_down, cards));
-    }
-    let mut stock = Vec::with_capacity(req.stock.len());
-    for c in &req.stock {
-        stock.push(to_card(c, req.suits).map_err(|e| (StatusCode::BAD_REQUEST, format!("stock: {e}")))?);
-    }
-
-    let mut board = Board::from_parts(&columns, &stock).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    board.allow_deal_with_empty = req.allow_deal_with_empty;
-
-    if board.has_unknowns() {
-        // Discovery: the fast, shortest-reveal search only. If it comes up empty,
-        // the UI offers "Search deeper", which runs as a cancellable, pollable
-        // background job (POST /reveal/jobs) rather than blocking this request.
-        let b = board.clone();
-        let advice: Advice = tokio::task::spawn_blocking(move || Solver::advise(&b, req.advise_nodes))
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let deals = advice.moves.iter().filter(|m| matches!(m, Move::Deal)).count();
-        let (phase, note) = if advice.moves.is_empty() {
-            (
-                "stuck",
-                "Nothing new can be revealed by the normal search — no short sequence reaches an unknown card. Use ↶ Undo to back up, or try a deeper search.".to_string(),
-            )
-        } else if advice.moves.len() == 1 && deals == 1 {
-            (
-                "discover",
-                "No move uncovers an unknown card — deal a row from the stock, then fill in any newly dealt cards.".to_string(),
-            )
-        } else if deals > 0 {
-            (
-                "discover",
-                format!(
-                    "Play {} step(s) — including {} — to reveal {} unknown card(s), then fill them in.",
-                    advice.moves.len(),
-                    if deals == 1 { "a deal".to_string() } else { format!("{deals} deals") },
-                    advice.uncovers
-                ),
-            )
-        } else {
-            (
-                "discover",
-                format!(
-                    "Play {} move(s) to reveal {} unknown card(s), then fill them in and continue.",
-                    advice.moves.len(),
-                    advice.uncovers
-                ),
-            )
-        };
-        return Ok(Json(PlanResponse {
-            phase: phase.to_string(),
-            moves: advice.moves.iter().map(move_dto).collect(),
-            note,
-            uncovers: Some(advice.uncovers),
-            verified: None,
-            winning_config: None,
-            nodes_searched: None,
-            deep: None,
-        }));
-    }
-
-    // Fully known → solve the rest. First reject an illegal deck (e.g. a mistyped
-    // card leaving 7 kings) so we return a clear reason instead of burning the
-    // whole node budget searching for a win that can't exist.
-    board
-        .check_deck_legal(req.suits)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    let solve_board = board.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        Solver::solve_portfolio(&solve_board, req.solve_nodes, solver::DEFAULT_PORTFOLIO)
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    match result.moves {
-        Some(moves) => {
-            let mut check = board.clone();
-            for &m in &moves {
-                check.make(m);
-            }
-            Ok(Json(PlanResponse {
-                phase: "solve".to_string(),
-                note: format!("Everything is known — here is a {}-move winning line.", moves.len()),
-                moves: moves.iter().map(move_dto).collect(),
-                uncovers: None,
-                verified: Some(check.is_won()),
-                winning_config: result.winning_config.map(|(weight, fdw)| ConfigDto { weight, fdw }),
-                nodes_searched: Some(result.nodes),
-                deep: None,
-            }))
-        }
-        None => Ok(Json(PlanResponse {
-            phase: "stuck".to_string(),
-            note: "The position is fully known, but no winning line was found in the budget — a filled-in card may be wrong, or the line you played may be a dead end. Try ↶ Undo, or raise the budget.".to_string(),
-            moves: Vec::new(),
-            uncovers: None,
-            verified: None,
-            winning_config: None,
-            nodes_searched: Some(result.nodes),
-            deep: None,
-        })),
     }
 }

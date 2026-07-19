@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 
 use crate::board::{Board, Move, Undo, COLS};
-use crate::card::{is_unknown, rank, suit};
+use crate::card::{is_unknown, rank, suit, Card};
 
 /// Default weight on the heuristic. `w = 1` is optimal but slow with a weak
 /// heuristic; larger `w` trades a little length for a lot of speed (weighted A*)
@@ -68,6 +68,21 @@ pub struct Advice {
 struct Frame {
     moves: Vec<Move>,
     idx: usize,
+}
+
+/// Result of `Solver::solve_deduced`: filling a partially-known board's unknowns
+/// with the cards the deck forces them to be, then solving.
+pub enum DeducedOutcome {
+    /// The unknowns aren't pinned down here — undealt stock is unknown, or there
+    /// are too many possible arrangements to try. (Fall back to a reveal search.)
+    NotDeducible,
+    /// One arrangement yields a win. `fills` are `(column, index, card)` for each
+    /// UNKNOWN cell, so the caller can record what the hidden cards must be.
+    Solved { moves: Vec<Move>, fills: Vec<(usize, usize, Card)> },
+    /// Every arrangement tried failed. `converged` is true only if each search
+    /// provably exhausted its space (a real "no win"), false if any merely ran
+    /// out of budget (inconclusive).
+    NoWin { tried: usize, converged: bool },
 }
 
 pub struct Solver;
@@ -311,6 +326,114 @@ impl Solver {
             None => Advice { uncovers: 0, completes: 0, empties: board.empty_columns(), moves: Vec::new() },
         }
     }
+
+    /// Last-resort for a board whose *only* remaining unknowns are pinned down by
+    /// the deck (the classic endgame: a couple of face-down cards you can't reach
+    /// to turn up, but which must be the couple of cards missing from everything
+    /// you've entered). Fill those cells with every distinct arrangement of the
+    /// deduced cards and solve each; return the first winning line (with the
+    /// arrangement that produced it), or a definitive "no win" once all
+    /// arrangements are exhausted. Cancellable via `stop`; publishes to `progress`.
+    ///
+    /// `max_perms` bounds how many arrangements we're willing to try (a small
+    /// number — this is meant for the tail of a game, not mid-play ambiguity).
+    pub fn solve_deduced(
+        board: &Board,
+        suits: u8,
+        node_limit: u64,
+        stop: &Arc<AtomicBool>,
+        progress: &Arc<AtomicU64>,
+        max_perms: usize,
+    ) -> DeducedOutcome {
+        // Only when every unknown is a tableau cell — an unknown in the undealt
+        // stock adds ambiguity we can't pin to a position.
+        if board.stock_has_unknown() {
+            return DeducedOutcome::NotDeducible;
+        }
+        let slots = board.unknown_tableau_slots();
+        let missing = board.missing_cards(suits);
+        if slots.is_empty() || slots.len() != missing.len() {
+            return DeducedOutcome::NotDeducible;
+        }
+        // Bound the arrangement count before enumerating (guard factorial blowups).
+        if slots.len() > 8 || distinct_perm_count(&missing) > max_perms {
+            return DeducedOutcome::NotDeducible;
+        }
+
+        let mut remaining = node_limit;
+        let mut tried = 0usize;
+        let mut all_converged = true;
+        let mut perm = missing;
+        perm.sort_unstable();
+        loop {
+            if stop.load(Ordering::Relaxed) || remaining == 0 {
+                break;
+            }
+            let mut b = board.clone();
+            for (&(c, i), &card) in slots.iter().zip(perm.iter()) {
+                b.cols[c][i] = card;
+            }
+            let res = Self::solve_portfolio_tracked(&b, remaining, DEFAULT_PORTFOLIO, stop, progress);
+            tried += 1;
+            remaining = remaining.saturating_sub(res.nodes);
+            if let Some(moves) = res.moves {
+                let fills = slots.iter().zip(perm.iter()).map(|(&(c, i), &card)| (c, i, card)).collect();
+                return DeducedOutcome::Solved { moves, fills };
+            }
+            if !res.converged {
+                all_converged = false;
+            }
+            // A winning portfolio sets `stop` to halt its own workers; a failing
+            // one leaves it clear, so a real cancel is still distinguishable.
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            if !next_distinct_permutation(&mut perm) {
+                return DeducedOutcome::NoWin { tried, converged: all_converged };
+            }
+        }
+        // Broke out early (cancelled or out of budget) — no definitive answer.
+        DeducedOutcome::NotDeducible
+    }
+}
+
+/// Number of distinct arrangements of a multiset: `n! / ∏(count_i!)`. Only called
+/// with `n <= 8`, so it fits comfortably in `u64`.
+fn distinct_perm_count(cards: &[Card]) -> usize {
+    let n = cards.len();
+    if n == 0 {
+        return 0;
+    }
+    let mut counts: std::collections::HashMap<Card, u64> = std::collections::HashMap::new();
+    for &c in cards {
+        *counts.entry(c).or_insert(0) += 1;
+    }
+    let fact = |k: u64| (1..=k).product::<u64>();
+    let denom: u64 = counts.values().map(|&v| fact(v)).product();
+    (fact(n as u64) / denom) as usize
+}
+
+/// In-place next lexicographic permutation. On a slice that starts sorted
+/// ascending, iterating until this returns false visits every *distinct*
+/// permutation exactly once (duplicates are skipped by construction).
+fn next_distinct_permutation<T: Ord>(a: &mut [T]) -> bool {
+    if a.len() < 2 {
+        return false;
+    }
+    let mut i = a.len() - 1;
+    while i > 0 && a[i - 1] >= a[i] {
+        i -= 1;
+    }
+    if i == 0 {
+        return false;
+    }
+    let mut j = a.len() - 1;
+    while a[j] <= a[i - 1] {
+        j -= 1;
+    }
+    a.swap(i - 1, j);
+    a[i..].reverse();
+    true
 }
 
 /// Cap on *consecutive* reversible moves in a reveal plan. A reversible move
@@ -1245,6 +1368,62 @@ mod tests {
         let advice = Solver::advise_deep(&board, 25_000_000, 200);
         assert!(!advice.moves.is_empty(), "wrapper should still find a reveal");
         assert!(plan_reveals(&board, &advice.moves));
+    }
+
+    #[test]
+    fn missing_cards_are_exactly_the_absent_ones() {
+        let mut board = Board::deal(4, 7);
+        assert!(board.missing_cards(4).is_empty(), "a full deal is missing nothing");
+        let a = board.cols[0][0];
+        let b = board.cols[1][0];
+        board.cols[0][0] = crate::card::UNKNOWN;
+        board.cols[1][0] = crate::card::UNKNOWN;
+        let mut missing = board.missing_cards(4);
+        missing.sort_unstable();
+        let mut expected = vec![a, b];
+        expected.sort_unstable();
+        assert_eq!(missing, expected);
+        assert_eq!(board.unknown_tableau_slots(), vec![(0, 0), (1, 0)]);
+        assert!(!board.stock_has_unknown());
+    }
+
+    #[test]
+    fn solve_deduced_reconstructs_hidden_cards_and_wins() {
+        // Take a solvable 1-suit deal, blank two of its cells, and confirm the
+        // deduce-and-solve fallback fills them back and finds a win.
+        let full = Board::deal(1, 1);
+        let mut board = full.clone();
+        board.cols[0][0] = crate::card::UNKNOWN;
+        board.cols[1][0] = crate::card::UNKNOWN;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let prog = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        match Solver::solve_deduced(&board, 1, 60_000_000, &stop, &prog, 4) {
+            DeducedOutcome::Solved { moves, fills } => {
+                let mut b = board.clone();
+                for &(c, i, card) in &fills {
+                    b.cols[c][i] = card;
+                }
+                assert!(!b.has_unknowns(), "fills should complete the deck");
+                for &m in &moves {
+                    b.make(m);
+                }
+                assert!(b.is_won(), "the deduced solution must actually win");
+            }
+            _ => panic!("expected a deduced solve for a solvable 1-suit deal"),
+        }
+    }
+
+    #[test]
+    fn solve_deduced_declines_when_stock_is_unknown() {
+        let mut board = Board::deal(4, 7);
+        board.stock[0] = crate::card::UNKNOWN;
+        board.cols[0][0] = crate::card::UNKNOWN;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let prog = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        assert!(matches!(
+            Solver::solve_deduced(&board, 4, 1_000_000, &stop, &prog, 4),
+            DeducedOutcome::NotDeducible
+        ));
     }
 
     #[test]
