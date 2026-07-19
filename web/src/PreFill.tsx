@@ -127,6 +127,34 @@ export default function PreFill({ suits, deal, onSuits, onDeal, onClose }: Props
     deal.tableau.reduce((n, c) => n + c.filter(Boolean).length, 0) +
     deal.stock.filter(Boolean).length;
 
+  // Deck legality: a full shoe is every in-suit card exactly `copies` times.
+  // We can always call out cards that appear too often or in a suit this deck
+  // doesn't use; missing cards only become meaningful once all 104 are typed in
+  // (before that, blanks are just cards you haven't seen yet). At 104 filled with
+  // no surplus and no wrong-suit cards, the deck is necessarily legal.
+  const label = (r: number, s: number) => cardToShort({ rank: r, suit: s });
+  const wrongSuit: string[] = [];
+  const overfull: string[] = [];
+  for (const [k, n] of counts) {
+    const [r, s] = k.split(',').map(Number);
+    if (s >= suits) wrongSuit.push(label(r, s));
+    else if (n > copies) overfull.push(`${label(r, s)}×${n}`);
+  }
+  const missing: string[] = [];
+  if (filled === 104) {
+    for (let r = 1; r <= 13; r++)
+      for (let s = 0; s < suits; s++) {
+        const short = copies - (counts.get(`${r},${s}`) ?? 0);
+        if (short > 0) missing.push(short > 1 ? `${label(r, s)}×${short}` : label(r, s));
+      }
+  }
+  const problems = [
+    wrongSuit.length && `not in this deck: ${wrongSuit.sort().join(', ')}`,
+    overfull.length && `too many: ${overfull.sort().join(', ')} (${copies} allowed each)`,
+    missing.length && `missing: ${missing.sort().join(', ')}`,
+  ].filter(Boolean) as string[];
+  const complete = filled === 104;
+
   return (
     <div className="prefill-backdrop" onMouseDown={onClose}>
       <div className="prefill" onMouseDown={(e) => e.stopPropagation()}>
@@ -140,7 +168,10 @@ export default function PreFill({ suits, deal, onSuits, onDeal, onClose }: Props
               <option value={4}>4</option>
             </select>
           </label>
-          <span className="prefill-count">{filled}/104 cards</span>
+          <span className={`prefill-count${problems.length ? ' bad' : complete ? ' ok' : ''}`}>
+            {filled}/104 cards
+            {problems.length ? ' — invalid' : complete ? ' — valid ✓' : ''}
+          </span>
           <span className="prefill-spacer" />
           <button onClick={clearAll}>Clear all</button>
           <button className="primary" onClick={onClose}>
@@ -153,6 +184,18 @@ export default function PreFill({ suits, deal, onSuits, onDeal, onClose }: Props
           <code>As</code> (suits: <b>s</b>♠ <b>h</b>♥ <b>c</b>♣ <b>d</b>♦). Leave a box
           blank for cards you can't see yet. Tab moves left to right.
         </p>
+
+        {problems.length > 0 && (
+          <div className="prefill-warning" role="alert">
+            <b>This deck can't be dealt.</b> A legal game needs every card exactly{' '}
+            {copies} time{copies > 1 ? 's' : ''}. Fix before sharing:
+            <ul>
+              {problems.map((p) => (
+                <li key={p}>{p}</li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         <div className="prefill-section">
           <div className="prefill-label">Stock — 50 cards, dealt in 5 rows of 10</div>
