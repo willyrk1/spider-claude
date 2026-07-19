@@ -581,7 +581,15 @@ struct PlanRequest {
 }
 
 fn default_deep_nodes() -> u64 {
-    25_000_000
+    // Budget for the opt-in deep reveal search. Calibrated against a real stuck
+    // position whose only reveal was a 14-move, two-deal maneuver: the search
+    // reaches it at just under 30M nodes, so the old 25M cap missed it by a hair.
+    // 60M is ~2x that threshold, giving headroom for similar deep, deal-dependent
+    // reveals. Because the search returns the instant it finds a reveal, a higher
+    // cap costs nothing on positions that have one — it only lengthens the worst
+    // case on genuinely dead-end boards (~0.6M nodes/sec ⇒ ~90-100s), which is
+    // acceptable for a button the UI already labels "(slow)".
+    60_000_000
 }
 
 fn default_deep_depth() -> usize {
