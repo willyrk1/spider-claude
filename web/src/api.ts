@@ -28,16 +28,28 @@ export type PlanParams = {
   allow_deal_with_empty?: boolean;
 };
 
+const UNREACHABLE =
+  "Can't reach the solver server — start it with `cargo run --release -p spider-api` and try again.";
+
+/**
+ * Turn a failed response into a useful Error. The API always sends a message
+ * body with its own errors, so a bodiless 5xx is the dev-server proxy telling
+ * us it couldn't connect to the API at all — a much more actionable thing to
+ * say than "API 500".
+ */
+async function failure(res: Response): Promise<Error> {
+  const text = await res.text().catch(() => '');
+  if (!text && res.status >= 500) return new Error(UNREACHABLE);
+  return new Error(`API ${res.status}${text ? `: ${text}` : ''}`);
+}
+
 async function postJson(url: string, body: unknown) {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`API ${res.status}${text ? `: ${text}` : ''}`);
-  }
+  if (!res.ok) throw await failure(res);
   return res.json();
 }
 
@@ -69,7 +81,7 @@ export async function startPlanJob(params: PlanParams): Promise<number> {
 export async function pollPlanJob(id: number): Promise<PlanJobStatus | null> {
   const res = await fetch(`/api/plan/jobs/${id}`);
   if (res.status === 404) return null; // reaped or unknown
-  if (!res.ok) throw new Error(`API ${res.status}`);
+  if (!res.ok) throw await failure(res);
   return res.json();
 }
 
