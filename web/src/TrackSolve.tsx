@@ -1,7 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Board, Foundations } from './Board';
 import PreFill from './PreFill';
-import { cancelSolveJob, plan, pollSolveJob, startSolveJob, type PlanResponse } from './api';
+import {
+  cancelJob,
+  plan,
+  pollJob,
+  startRevealJob,
+  startSolveJob,
+  type JobKind,
+  type PlanResponse,
+} from './api';
 import {
   boardDisplayState,
   boardToDisplayState,
@@ -88,8 +96,11 @@ export default function TrackSolve() {
   const [resp, setResp] = useState<PlanResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Long solves run as a background job the UI polls (with a Cancel).
+  // Long searches run as a background job the UI polls (with a Cancel). Both the
+  // full solve and the deep reveal search use this same machinery; `jobKind`
+  // tracks which so we poll/cancel the right endpoint and label it correctly.
   const [solveJob, setSolveJob] = useState<number | null>(null);
+  const [jobKind, setJobKind] = useState<JobKind>('solve');
   const [jobProgress, setJobProgress] = useState<{ nodes: number; elapsedMs: number } | null>(null);
   const [drafts, setDrafts] = useState<Record<number, string>>({});
   const [sessionText, setSessionText] = useState('');
@@ -272,7 +283,7 @@ export default function TrackSolve() {
     setResp(null);
   }
 
-  async function onPlan(deep = false) {
+  async function onPlan() {
     if (unfilled) {
       setError('Fill in the revealed (?) cards first.');
       return;
@@ -286,7 +297,6 @@ export default function TrackSolve() {
         columns: planColumns(board, deal),
         stock: planStock(board, deal),
         allow_deal_with_empty: ALLOW_DEAL_WITH_EMPTY_COLUMNS,
-        deep,
       });
       setResp(r);
     } catch (e) {
@@ -301,13 +311,36 @@ export default function TrackSolve() {
   async function onSolveJob() {
     setError(null);
     setResp(null);
+    const params = {
+      suits,
+      columns: planColumns(board, deal),
+      stock: planStock(board, deal),
+      allow_deal_with_empty: ALLOW_DEAL_WITH_EMPTY_COLUMNS,
+    };
     try {
-      const id = await startSolveJob({
-        suits,
-        columns: planColumns(board, deal),
-        stock: planStock(board, deal),
-        allow_deal_with_empty: ALLOW_DEAL_WITH_EMPTY_COLUMNS,
-      });
+      setJobKind('solve');
+      const id = await startSolveJob(params);
+      setJobProgress({ nodes: 0, elapsedMs: 0 });
+      setSolveJob(id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** Start the deep reveal search as a background job (cancellable, polled). */
+  async function onRevealDeep() {
+    setError(null);
+    setDeepConfirmed(false);
+    setResp(null); // hide the "stuck" banner; the progress panel takes over
+    const params = {
+      suits,
+      columns: planColumns(board, deal),
+      stock: planStock(board, deal),
+      allow_deal_with_empty: ALLOW_DEAL_WITH_EMPTY_COLUMNS,
+    };
+    try {
+      setJobKind('reveal');
+      const id = await startRevealJob(params);
       setJobProgress({ nodes: 0, elapsedMs: 0 });
       setSolveJob(id);
     } catch (e) {
@@ -316,7 +349,7 @@ export default function TrackSolve() {
   }
 
   function cancelSolve() {
-    if (solveJob !== null) cancelSolveJob(solveJob);
+    if (solveJob !== null) cancelJob(jobKind, solveJob);
     setSolveJob(null);
     setJobProgress(null);
   }
@@ -328,12 +361,12 @@ export default function TrackSolve() {
     let timer: ReturnType<typeof setTimeout>;
     const tick = async () => {
       try {
-        const s = await pollSolveJob(solveJob);
+        const s = await pollJob(jobKind, solveJob);
         if (stopped) return;
         if (!s) {
           setSolveJob(null);
           setJobProgress(null);
-          setError('The solve was dropped (server restarted or it timed out). Try again.');
+          setError('The search was dropped (server restarted or it timed out). Try again.');
           return;
         }
         setJobProgress({ nodes: s.nodes, elapsedMs: s.elapsed_ms });
@@ -356,12 +389,12 @@ export default function TrackSolve() {
       stopped = true;
       clearTimeout(timer);
     };
-  }, [solveJob]);
+  }, [solveJob, jobKind]);
 
   // If the board changes under a running job, its result is stale — cancel it.
   useEffect(() => {
     if (solveJob !== null) {
-      cancelSolveJob(solveJob);
+      cancelJob(jobKind, solveJob);
       setSolveJob(null);
       setJobProgress(null);
     }
@@ -431,7 +464,9 @@ export default function TrackSolve() {
             disabled={loading || unfilled || solveJob !== null}
           >
             {solveJob !== null
-              ? 'Solving…'
+              ? jobKind === 'reveal'
+                ? 'Searching…'
+                : 'Solving…'
               : loading
                 ? 'Thinking…'
                 : fullyKnown(board, deal)
@@ -483,7 +518,7 @@ export default function TrackSolve() {
           <div className="banner good solving">
             <div className="solving-head">
               <span className="spinner" />
-              <b>Searching for a solution…</b>
+              <b>{jobKind === 'reveal' ? 'Searching deeper for a reveal…' : 'Searching for a solution…'}</b>
             </div>
             <div className="solve-progress">
               {jobProgress
@@ -491,7 +526,9 @@ export default function TrackSolve() {
                 : 'starting…'}
             </div>
             <p className="hint" style={{ margin: '4px 0 8px' }}>
-              Runs until it finds a line or you cancel. Hard deals can take minutes.
+              {jobKind === 'reveal'
+                ? 'Digs for a way to uncover a card. Deep lines can take a while, or come up empty.'
+                : 'Runs until it finds a line or you cancel. Hard deals can take minutes.'}
             </p>
             <button onClick={cancelSolve}>Cancel search</button>
           </div>
@@ -534,10 +571,11 @@ export default function TrackSolve() {
               {isSolve && resp.verified ? ' ✓ verified' : ''}
             </div>
 
-            {/* Normal search came up empty — offer the slower, deeper search. */}
+            {/* Normal search came up empty — offer the slower, deeper search,
+                which runs as a cancellable background job with progress. */}
             {resp.phase === 'stuck' && !resp.deep && (
-              <button className="primary" onClick={() => onPlan(true)} disabled={loading}>
-                {loading ? 'Searching deeper…' : '🔎 Search deeper (slow)'}
+              <button className="primary" onClick={onRevealDeep}>
+                🔎 Search deeper (slow)
               </button>
             )}
 

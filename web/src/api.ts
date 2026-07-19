@@ -21,8 +21,6 @@ export type PlanParams = {
   columns: PlanColumn[];
   stock: PlanCard[];
   allow_deal_with_empty?: boolean;
-  /** Opt in to the deeper reveal search when the normal one is stuck. */
-  deep?: boolean;
 };
 
 async function postJson(url: string, body: unknown) {
@@ -43,7 +41,14 @@ export function plan(params: PlanParams): Promise<PlanResponse> {
   return postJson('/api/plan', params);
 }
 
-// ---- Async solve jobs (long, cancellable, polled) ----
+// ---- Async jobs (long, cancellable, polled) ----
+//
+// Two kinds share the same job machinery on the server (poll/cancel/heartbeat/
+// reaper): a full solve of a known board, and a deep reveal search on a
+// partially-known one. They start at different endpoints but poll/cancel the
+// same way, keyed by `kind`.
+
+export type JobKind = 'solve' | 'reveal';
 
 export type SolveJobStatus = {
   status: 'running' | 'done' | 'cancelled';
@@ -58,15 +63,21 @@ export async function startSolveJob(params: PlanParams): Promise<number> {
   return job_id;
 }
 
-/** GET /solve/jobs/:id — poll a job (also renews its lease/heartbeat). */
-export async function pollSolveJob(id: number): Promise<SolveJobStatus | null> {
-  const res = await fetch(`/api/solve/jobs/${id}`);
+/** POST /reveal/jobs — kick off a background deep reveal search. */
+export async function startRevealJob(params: PlanParams): Promise<number> {
+  const { job_id } = await postJson('/api/reveal/jobs', params);
+  return job_id;
+}
+
+/** GET /{kind}/jobs/:id — poll a job (also renews its lease/heartbeat). */
+export async function pollJob(kind: JobKind, id: number): Promise<SolveJobStatus | null> {
+  const res = await fetch(`/api/${kind}/jobs/${id}`);
   if (res.status === 404) return null; // reaped or unknown
   if (!res.ok) throw new Error(`API ${res.status}`);
   return res.json();
 }
 
-/** DELETE /solve/jobs/:id — cancel a running job. */
-export async function cancelSolveJob(id: number): Promise<void> {
-  await fetch(`/api/solve/jobs/${id}`, { method: 'DELETE' }).catch(() => {});
+/** DELETE /{kind}/jobs/:id — cancel a running job. */
+export async function cancelJob(kind: JobKind, id: number): Promise<void> {
+  await fetch(`/api/${kind}/jobs/${id}`, { method: 'DELETE' }).catch(() => {});
 }

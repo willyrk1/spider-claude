@@ -41,10 +41,16 @@ async fn main() {
         // Long, cancellable solve as a background job the UI polls.
         .route("/solve/jobs", post(solve_job_start))
         .route("/solve/jobs/:id", get(solve_job_poll).delete(solve_job_cancel))
+        // The deep reveal search is just as long and cancellable, so it runs as
+        // the same kind of job; poll/cancel are shared with the solve jobs.
+        .route("/reveal/jobs", post(reveal_job_start))
+        .route("/reveal/jobs/:id", get(solve_job_poll).delete(solve_job_cancel))
         .with_state(state);
 
-    let addr = "127.0.0.1:3000";
-    let listener = tokio::net::TcpListener::bind(addr)
+    // Bind address defaults to localhost:3000; override with SPIDER_API_ADDR
+    // (e.g. to run a second instance on another port without a conflict).
+    let addr = std::env::var("SPIDER_API_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+    let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("bind address");
     println!("spider-api listening on http://{addr}");
@@ -141,6 +147,81 @@ async fn solve_job_start(
     });
 
     Ok(Json(JobStarted { job_id: id }))
+}
+
+/// Start a background deep *reveal* search on a partially-known board. Same job
+/// machinery (poll/cancel/heartbeat/reaper) as a solve — the deep search can run
+/// as long, and is now cancellable and progress-reporting via `advise_deep_tracked`.
+async fn reveal_job_start(
+    State(state): State<AppState>,
+    Json(req): Json<PlanRequest>,
+) -> Result<Json<JobStarted>, (StatusCode, String)> {
+    let board = board_from_plan(&req)?;
+    if !board.has_unknowns() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "board is fully known — there is nothing to reveal".into(),
+        ));
+    }
+
+    let job = Arc::new(Job {
+        stop: Arc::new(AtomicBool::new(false)),
+        progress: Arc::new(AtomicU64::new(0)),
+        started: Instant::now(),
+        last_seen: Mutex::new(Instant::now()),
+        finished: Mutex::new(None),
+        result: Mutex::new(None),
+        cancelled: AtomicBool::new(false),
+    });
+    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    state.jobs.lock().unwrap().insert(id, Arc::clone(&job));
+
+    std::thread::spawn(move || {
+        let advice = Solver::advise_deep_tracked(
+            &board,
+            default_deep_nodes(),
+            default_deep_depth(),
+            &job.stop,
+            &job.progress,
+        );
+        *job.result.lock().unwrap() = Some(reveal_response(advice));
+        *job.finished.lock().unwrap() = Some(Instant::now());
+    });
+
+    Ok(Json(JobStarted { job_id: id }))
+}
+
+/// Turn a deep-reveal `Advice` into the `PlanResponse` the UI already renders for
+/// the `deep` discovery path (mirrors the note the synchronous path used).
+fn reveal_response(advice: Advice) -> PlanResponse {
+    let deals = advice.moves.iter().filter(|m| matches!(m, Move::Deal)).count();
+    if advice.moves.is_empty() {
+        return PlanResponse {
+            phase: "stuck".to_string(),
+            note: "Even a deep search found no way to reveal a card within its budget — this line is very likely a dead end. Use ↶ Undo to back up and try a different one.".to_string(),
+            moves: Vec::new(),
+            uncovers: Some(0),
+            verified: None,
+            winning_config: None,
+            nodes_searched: None,
+            deep: Some(true),
+        };
+    }
+    PlanResponse {
+        phase: "discover".to_string(),
+        note: format!(
+            "Deep search: a {}-move line ({}) reveals {} unknown card(s) — but it's a long, committal maneuver. Review it before playing it out.",
+            advice.moves.len(),
+            if deals == 1 { "1 deal".to_string() } else { format!("{deals} deals") },
+            advice.uncovers
+        ),
+        moves: advice.moves.iter().map(move_dto).collect(),
+        uncovers: Some(advice.uncovers),
+        verified: None,
+        winning_config: None,
+        nodes_searched: None,
+        deep: Some(true),
+    }
 }
 
 async fn solve_job_poll(
@@ -573,11 +654,6 @@ struct PlanRequest {
     /// false — the standard rule forbids it).
     #[serde(default)]
     allow_deal_with_empty: bool,
-    /// Opt in to the deeper, depth-first reveal search when the normal one finds
-    /// nothing. It can uncover a card reachable only via a long maneuver, but the
-    /// plan may be very long — the client should warn before using it.
-    #[serde(default)]
-    deep: bool,
 }
 
 fn default_deep_nodes() -> u64 {
@@ -659,45 +735,18 @@ async fn plan(Json(req): Json<PlanRequest>) -> Result<Json<PlanResponse>, (Statu
     board.allow_deal_with_empty = req.allow_deal_with_empty;
 
     if board.has_unknowns() {
-        // Discovery: uncover more face-down cards. Normal search first (shortest
-        // reveal within a small budget); if that's stuck and the caller opted in,
-        // fall back to the deeper depth-first search.
+        // Discovery: the fast, shortest-reveal search only. If it comes up empty,
+        // the UI offers "Search deeper", which runs as a cancellable, pollable
+        // background job (POST /reveal/jobs) rather than blocking this request.
         let b = board.clone();
-        let mut advice: Advice = tokio::task::spawn_blocking(move || Solver::advise(&b, req.advise_nodes))
+        let advice: Advice = tokio::task::spawn_blocking(move || Solver::advise(&b, req.advise_nodes))
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let mut used_deep = false;
-        if advice.moves.is_empty() && req.deep {
-            let b = board.clone();
-            advice = tokio::task::spawn_blocking(move || {
-                Solver::advise_deep(&b, default_deep_nodes(), default_deep_depth())
-            })
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            used_deep = true;
-        }
         let deals = advice.moves.iter().filter(|m| matches!(m, Move::Deal)).count();
         let (phase, note) = if advice.moves.is_empty() {
-            if used_deep {
-                (
-                    "stuck",
-                    "Even a deep search found no way to reveal a card within its budget — this line is very likely a dead end. Use ↶ Undo to back up and try a different one.".to_string(),
-                )
-            } else {
-                (
-                    "stuck",
-                    "Nothing new can be revealed by the normal search — no short sequence reaches an unknown card. Use ↶ Undo to back up, or try a deeper search.".to_string(),
-                )
-            }
-        } else if used_deep {
             (
-                "discover",
-                format!(
-                    "Deep search: a {}-move line ({}) reveals {} unknown card(s) — but it's a long, committal maneuver. Review it before playing it out.",
-                    advice.moves.len(),
-                    if deals == 1 { "1 deal".to_string() } else { format!("{deals} deals") },
-                    advice.uncovers
-                ),
+                "stuck",
+                "Nothing new can be revealed by the normal search — no short sequence reaches an unknown card. Use ↶ Undo to back up, or try a deeper search.".to_string(),
             )
         } else if advice.moves.len() == 1 && deals == 1 {
             (
@@ -732,7 +781,7 @@ async fn plan(Json(req): Json<PlanRequest>) -> Result<Json<PlanResponse>, (Statu
             verified: None,
             winning_config: None,
             nodes_searched: None,
-            deep: if used_deep { Some(true) } else { None },
+            deep: None,
         }));
     }
 

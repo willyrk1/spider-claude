@@ -236,6 +236,22 @@ impl Solver {
     /// budget across the whole sweep. The result can still be long; callers should
     /// warn before using it. Returns an empty plan if nothing is found in budget.
     pub fn advise_deep(board: &Board, node_limit: u64, depth_limit: usize) -> Advice {
+        let never = AtomicBool::new(false);
+        let progress = AtomicU64::new(0);
+        Self::advise_deep_tracked(board, node_limit, depth_limit, &never, &progress)
+    }
+
+    /// The deep reveal search, driven by a caller-owned `stop` flag (set it to
+    /// cancel mid-search) and publishing a running node total to `progress` (for a
+    /// UI to poll) — the same contract `solve_portfolio_tracked` offers for the
+    /// full solve. `advise_deep` is the fire-and-forget wrapper over this.
+    pub fn advise_deep_tracked(
+        board: &Board,
+        node_limit: u64,
+        depth_limit: usize,
+        stop: &AtomicBool,
+        progress: &AtomicU64,
+    ) -> Advice {
         let start_completed = board.completed;
 
         // Primary: a best-first search heads straight for the shallowest buried
@@ -244,22 +260,29 @@ impl Solver {
         // back to the depth-first cap-ladder — which is strictly weaker (it caps
         // consecutive reversible moves, so it explores a subset), but explores in
         // a different order, giving a second chance when A* exhausts its budget.
-        let (astar, used) = search_reveals_astar(board, node_limit, REVEAL_ASTAR_WEIGHT);
+        let (astar, used) = search_reveals_astar(board, node_limit, REVEAL_ASTAR_WEIGHT, stop, progress);
         let best = astar.or_else(|| {
+            // Don't start the (potentially long) DFS ladder if we were cancelled.
+            if stop.load(Ordering::Relaxed) {
+                return None;
+            }
             let mut remaining = node_limit.saturating_sub(used);
             let mut best: Option<Vec<Move>> = None;
             // A reveal this short is already fine for the "here's a deep line"
             // warning; don't burn budget chasing a few fewer moves.
             const GOOD_ENOUGH: usize = 60;
             for cap in [2u32, 3, 4, 5, 6, 8] {
-                if remaining == 0 || best.as_ref().is_some_and(|p| p.len() <= GOOD_ENOUGH) {
+                if remaining == 0
+                    || stop.load(Ordering::Relaxed)
+                    || best.as_ref().is_some_and(|p| p.len() <= GOOD_ENOUGH)
+                {
                     break;
                 }
                 let depth = best.as_ref().map_or(depth_limit, |p| p.len().saturating_sub(1));
                 if depth == 0 {
                     break;
                 }
-                let (found, u) = search_reveals_deep(board, remaining, depth, cap);
+                let (found, u) = search_reveals_deep(board, remaining, depth, cap, stop, progress);
                 remaining = remaining.saturating_sub(u);
                 if let Some(moves) = found {
                     if best.as_ref().map_or(true, |b| moves.len() < b.len()) {
@@ -465,6 +488,8 @@ fn search_reveals_deep(
     node_limit: u64,
     depth_limit: usize,
     max_reversible: u32,
+    stop: &AtomicBool,
+    progress: &AtomicU64,
 ) -> (Option<Vec<Move>>, u64) {
     let start = start_board.clone();
 
@@ -513,6 +538,14 @@ fn search_reveals_deep(
             continue;
         }
         nodes += 1;
+        // Batch progress and check for cancellation together (every 65536 nodes ≈
+        // well under a tenth of a second, so cancel feels immediate).
+        if nodes & 0xFFFF == 0 {
+            progress.fetch_add(0x10000, Ordering::Relaxed);
+            if stop.load(Ordering::Relaxed) {
+                return (None, nodes);
+            }
+        }
         if nodes > node_limit {
             b.undo(&undo);
             break;
@@ -607,7 +640,13 @@ fn reveal_move_cost(b: &Board, m: Move) -> u32 {
 /// reveals_deep`, it heads straight for the shallowest buried unknown and returns
 /// a far shorter line, without a reversible-run cap (churn just costs `g`, so
 /// it's naturally deprioritized). Same memory-lean node arena as `astar_short`.
-fn search_reveals_astar(start: &Board, node_limit: u64, weight: u32) -> (Option<Vec<Move>>, u64) {
+fn search_reveals_astar(
+    start: &Board,
+    node_limit: u64,
+    weight: u32,
+    stop: &AtomicBool,
+    progress: &AtomicU64,
+) -> (Option<Vec<Move>>, u64) {
     let mut arena: Vec<Node> = vec![Node { parent: u32::MAX, mv: Move::Deal }];
     let mut closed: HashSet<u64> = HashSet::new();
     let mut open: BinaryHeap<(Reverse<u32>, u32, u32)> = BinaryHeap::new();
@@ -617,11 +656,20 @@ fn search_reveals_astar(start: &Board, node_limit: u64, weight: u32) -> (Option<
     let mut nodes: u64 = 0;
 
     while let Some((_pri, g, idx)) = open.pop() {
+        // The caller cancelled (e.g. the poller went away) — abandon the search.
+        if stop.load(Ordering::Relaxed) {
+            return (None, nodes);
+        }
         let mut board = board_at(start, &arena, idx);
         let mut moves = Vec::new();
         board.gen_moves(&mut moves);
         for m in moves {
             nodes += 1;
+            // Publish progress in coarse batches so a poller can watch node churn
+            // without contending the counter (mirrors `astar_short`).
+            if nodes & 0xFFFF == 0 {
+                progress.fetch_add(0x10000, Ordering::Relaxed);
+            }
             if nodes > node_limit {
                 return (None, nodes);
             }
@@ -1111,7 +1159,10 @@ mod tests {
         // The raw depth-first search (before simplification) must never run more
         // than its `max_reversible` reversible moves in a row.
         let board = frozen_known_stock_board();
-        let (found, _) = search_reveals_deep(&board, 25_000_000, 200, MAX_CONSEC_REVERSIBLE);
+        let never = std::sync::atomic::AtomicBool::new(false);
+        let progress = std::sync::atomic::AtomicU64::new(0);
+        let (found, _) =
+            search_reveals_deep(&board, 25_000_000, 200, MAX_CONSEC_REVERSIBLE, &never, &progress);
         let moves = found.expect("deep search should find a reveal at the loosest cap");
 
         let mut end = board.clone();
@@ -1167,10 +1218,33 @@ mod tests {
         // line — far shorter than the depth-first search's wandering. On this
         // frozen board it finds a single-digit-move reveal in a few thousand nodes.
         let board = frozen_known_stock_board();
-        let (found, _) = search_reveals_astar(&board, 25_000_000, REVEAL_ASTAR_WEIGHT);
+        let never = std::sync::atomic::AtomicBool::new(false);
+        let progress = std::sync::atomic::AtomicU64::new(0);
+        let (found, _) =
+            search_reveals_astar(&board, 25_000_000, REVEAL_ASTAR_WEIGHT, &never, &progress);
         let moves = found.expect("best-first search should find a reveal");
         assert!(moves.len() <= 20, "expected a short line, got {}", moves.len());
         assert!(plan_reveals(&board, &moves));
+    }
+
+    #[test]
+    fn advise_deep_tracked_honors_a_preset_stop() {
+        // A stop flag already set means "cancelled" — the tracked deep search must
+        // bail out with no plan instead of running the full budget.
+        let board = frozen_known_stock_board();
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        let progress = std::sync::atomic::AtomicU64::new(0);
+        let advice = Solver::advise_deep_tracked(&board, 25_000_000, 200, &stop, &progress);
+        assert!(advice.moves.is_empty(), "a cancelled search must return no moves");
+    }
+
+    #[test]
+    fn advise_deep_untracked_wrapper_still_finds_a_reveal() {
+        // The fire-and-forget wrapper must behave exactly as before the refactor.
+        let board = frozen_known_stock_board();
+        let advice = Solver::advise_deep(&board, 25_000_000, 200);
+        assert!(!advice.moves.is_empty(), "wrapper should still find a reveal");
+        assert!(plan_reveals(&board, &advice.moves));
     }
 
     #[test]
