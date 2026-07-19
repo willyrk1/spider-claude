@@ -349,10 +349,15 @@ export default function TrackSolve() {
     if (jobId === null) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
+    // Give up rather than spin forever if the server becomes unreachable (a
+    // dropped dev server, a network blip). Resets on any successful poll.
+    let failures = 0;
+    const MAX_FAILURES = 5;
     const tick = async () => {
       try {
         const s = await pollPlanJob(jobId);
         if (stopped) return;
+        failures = 0;
         if (!s) {
           setJobId(null);
           setJobProgress(null);
@@ -377,7 +382,15 @@ export default function TrackSolve() {
           timer = setTimeout(tick, 1000);
         }
       } catch {
-        if (!stopped) timer = setTimeout(tick, 1500);
+        if (stopped) return;
+        failures += 1;
+        if (failures >= MAX_FAILURES) {
+          setJobId(null);
+          setJobProgress(null);
+          setError("Lost contact with the server — the search may still be running, but the app can't reach it. Check the server, then try again.");
+          return;
+        }
+        timer = setTimeout(tick, 1500);
       }
     };
     timer = setTimeout(tick, 300);

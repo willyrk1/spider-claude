@@ -304,13 +304,23 @@ fn deduced_solve_response(board: &Board, suits: u8, moves: Vec<Move>, fills: Vec
         .iter()
         .map(|&(col, index, card)| FillDto { col, index, rank: rank(card), suit: suit(card) })
         .collect();
+    // When two or more *distinct* cards fill the unknown cells, only their
+    // multiset is deduced — which card sits where is a guess (we return the first
+    // arrangement that happens to win). Say so, so a wrong guess isn't a surprise.
+    let distinct: std::collections::HashSet<(u8, u8)> =
+        fills.iter().map(|&(_, _, c)| (rank(c), suit(c))).collect();
+    let ambiguous = fills.len() >= 2 && distinct.len() >= 2;
+    let mut note = format!(
+        "The last hidden card(s) can only be {}. Filled in, this deal is winnable in {} moves.",
+        deduced_card_list(board, suits),
+        moves.len()
+    );
+    if ambiguous {
+        note.push_str(" Their order here is a guess — if the cards come up the other way when you finally uncover them, swap them and solve again.");
+    }
     PlanResponse {
         phase: "solve".to_string(),
-        note: format!(
-            "The last hidden card(s) can only be {}. Filled in, this deal is winnable in {} moves.",
-            deduced_card_list(board, suits),
-            moves.len()
-        ),
+        note,
         moves: moves.iter().map(move_dto).collect(),
         uncovers: None,
         verified: Some(check.is_won()),
