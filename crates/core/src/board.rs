@@ -176,6 +176,68 @@ impl Board {
         Ok(Board { cols, face_down, stock: stock.to_vec(), completed: 0, allow_deal_with_empty: false })
     }
 
+    /// Check that a fully-known board is a legal two-deck Spider shoe for
+    /// `suits`. A legal shoe holds every in-suit card exactly `8 / suits` times
+    /// (2 for 4-suit, 4 for 2-suit, 8 for 1-suit). A *surplus* — any card
+    /// appearing more often than that — is always illegal, no matter how far the
+    /// game has progressed, since completing runs only ever removes cards. When
+    /// no runs have been cleared yet (`completed == 0`, i.e. the board still
+    /// holds all 104 cards) we can also report *missing* cards; once runs have
+    /// been cleared we can't, because we no longer know which suits left play.
+    ///
+    /// Returns `Err` with a human-readable reason (naming the offending cards)
+    /// when the deck can't be dealt, so callers can reject it up front instead of
+    /// searching for a win that can't exist. Assumes the board is fully known
+    /// (call `has_unknowns` first); unknown cards are ignored.
+    pub fn check_deck_legal(&self, suits: u8) -> Result<(), String> {
+        if !matches!(suits, 1 | 2 | 4) {
+            return Err(format!("suits must be 1, 2, or 4, got {suits}"));
+        }
+        let copies = (8 / suits) as u32;
+
+        // Count every known card on the board (columns include face-down cards).
+        let mut counts = [[0u32; 4]; 14]; // [rank][suit]; rank 0 unused
+        for &card in self.cols.iter().flatten().chain(self.stock.iter()) {
+            if is_unknown(card) {
+                continue;
+            }
+            let (r, s) = (rank(card) as usize, suit(card) as usize);
+            if (1..=13).contains(&r) && s < 4 {
+                counts[r][s] += 1;
+            }
+        }
+
+        let mut surplus: Vec<String> = Vec::new();
+        let mut missing: Vec<String> = Vec::new();
+        for r in 1..=13u8 {
+            for s in 0..suits {
+                let n = counts[r as usize][s as usize];
+                if n > copies {
+                    surplus.push(format!("{}×{n}", name(make_card(r, s))));
+                } else if n < copies && self.completed == 0 {
+                    let short = copies - n;
+                    let nm = name(make_card(r, s));
+                    missing.push(if short > 1 { format!("{nm}×{short}") } else { nm });
+                }
+            }
+        }
+
+        if surplus.is_empty() && missing.is_empty() {
+            return Ok(());
+        }
+        let mut parts = Vec::new();
+        if !surplus.is_empty() {
+            parts.push(format!("too many — {}", surplus.join(", ")));
+        }
+        if !missing.is_empty() {
+            parts.push(format!("missing — {}", missing.join(", ")));
+        }
+        Err(format!(
+            "illegal deck ({suits}-suit needs every card exactly {copies}×): {}",
+            parts.join("; ")
+        ))
+    }
+
     /// Whether any card (tableau or stock) is still unknown.
     pub fn has_unknowns(&self) -> bool {
         self.cols.iter().flatten().any(|&c| is_unknown(c))
@@ -509,5 +571,52 @@ mod tests {
         let mut moves = Vec::new();
         board.gen_moves(&mut moves);
         assert!(moves.contains(&Move::Deal));
+    }
+
+    #[test]
+    fn fresh_deal_is_a_legal_deck() {
+        for &suits in &[1u8, 2, 4] {
+            let board = Board::deal(suits, 7);
+            assert!(board.check_deck_legal(suits).is_ok(), "{suits}-suit deal should be legal");
+        }
+    }
+
+    #[test]
+    fn surplus_and_missing_are_rejected() {
+        // Start from a legal 4-suit deal, then duplicate a card over another:
+        // turn one A♦ into a third A♣, leaving 3× A♣ and 1× A♦ (both wrong).
+        let mut board = Board::deal(4, 7);
+        let a_clubs = make_card(1, 2);
+        let a_diamonds = make_card(1, 3);
+        let mut swapped = false;
+        'outer: for col in board.cols.iter_mut() {
+            for c in col.iter_mut() {
+                if *c == a_diamonds {
+                    *c = a_clubs;
+                    swapped = true;
+                    break 'outer;
+                }
+            }
+        }
+        assert!(swapped, "test deal should contain an A♦ to overwrite");
+
+        let err = board.check_deck_legal(4).expect_err("deck is now illegal");
+        assert!(err.contains("too many"), "should flag the surplus: {err}");
+        assert!(err.contains("missing"), "should flag the missing card: {err}");
+    }
+
+    #[test]
+    fn surplus_flagged_even_after_a_completed_run() {
+        // With a run already cleared we can't know what's missing, but a surplus
+        // is still unconditionally illegal.
+        let mut board = Board::deal(4, 7);
+        board.completed = 1;
+        // Force a surplus: make every stock card the King of Spades.
+        for c in board.stock.iter_mut() {
+            *c = make_card(13, 0);
+        }
+        let err = board.check_deck_legal(4).expect_err("surplus is illegal");
+        assert!(err.contains("too many"), "{err}");
+        assert!(!err.contains("missing"), "missing must be suppressed once runs cleared: {err}");
     }
 }

@@ -110,6 +110,9 @@ async fn solve_job_start(
             "board still has unknown cards — fill them in before solving".into(),
         ));
     }
+    board
+        .check_deck_legal(req.suits)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let job = Arc::new(Job {
         stop: Arc::new(AtomicBool::new(false)),
@@ -725,7 +728,12 @@ async fn plan(Json(req): Json<PlanRequest>) -> Result<Json<PlanResponse>, (Statu
         }));
     }
 
-    // Fully known → solve the rest.
+    // Fully known → solve the rest. First reject an illegal deck (e.g. a mistyped
+    // card leaving 7 kings) so we return a clear reason instead of burning the
+    // whole node budget searching for a win that can't exist.
+    board
+        .check_deck_legal(req.suits)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let solve_board = board.clone();
     let result = tokio::task::spawn_blocking(move || {
         Solver::solve_portfolio(&solve_board, req.solve_nodes, solver::DEFAULT_PORTFOLIO)
