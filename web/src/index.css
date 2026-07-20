@@ -240,7 +240,9 @@ button.big { padding: 11px 14px; font-size: 15px; }
 /* Foundations (completed runs) */
 .foundations {
   display: flex; gap: 8px; align-items: flex-start; position: relative;
-  padding: 18px 0 10px;
+  /* The 4px sides match `.board` and, more importantly, keep the scroll
+     container from clipping the first pile's border and shadow flat. */
+  padding: 18px 4px 10px;
   border-bottom: 1px solid var(--panel-line); margin-bottom: 6px; overflow-x: auto;
 }
 .foundations-label { position: absolute; top: 0; left: 0; width: auto; text-align: left; }
@@ -295,8 +297,13 @@ button.big { padding: 11px 14px; font-size: 15px; }
 .card.black { color: var(--suit-black); }
 .card.green { color: var(--suit-green); }
 .card.blue { color: var(--suit-blue); }
-.card .corner, .foundation .corner { position: absolute; top: 4px; left: 6px; font-size: 15px; font-weight: 700; line-height: 1; }
-.card .pip, .foundation .pip { position: absolute; bottom: 6px; right: 8px; font-size: 20px; opacity: 0.85; }
+/* Only a ~22px sliver of a buried card shows, so the rank runs large and heavy
+   to stay readable in that strip. */
+.card .corner, .foundation .corner {
+  position: absolute; top: 3px; left: 6px;
+  font-size: 18px; font-weight: 800; line-height: 1;
+}
+.card .pip, .foundation .pip { position: absolute; bottom: 5px; right: 7px; font-size: 24px; opacity: 0.85; }
 .card.down {
   background: repeating-linear-gradient(45deg, #22557a, #22557a 6px, #1c476a 6px, #1c476a 12px);
   border-color: #12314a;
