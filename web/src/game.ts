@@ -5,7 +5,9 @@
 // Cards use the same encoding as the core: rank 1..13 (A=1, K=13), suit 0..3
 // (0=spades, 1=hearts, 2=clubs, 3=diamonds).
 
-export type Card = { rank: number; suit: number };
+/** `id` (optional) is a stable per-deal identity so the play table can animate
+ * a card as it moves; the replay logic below never reads it. */
+export type Card = { rank: number; suit: number; id?: number };
 
 export type Move =
   | { type: 'tableau'; from: number; to: number; count: number }

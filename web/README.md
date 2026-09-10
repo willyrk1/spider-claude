@@ -1,6 +1,37 @@
 # spider-web
 
-A React + TypeScript front end for the Spider Solitaire solver. Two modes:
+A React + TypeScript front end for the Spider Solitaire solver, plus a casual
+table for just playing.
+
+## Just play (`play.html`)
+
+A random deal you play yourself — built phone-first, and entirely in the
+browser (no solver server), so it can be hosted on any static host.
+
+- **Tap a card** to move it (with everything on top of it). It goes to the first
+  of: a column whose top card is the **same suit** (the one that makes the
+  longest same-suit run wins); a column with a **different suit**; an **empty**
+  column. If it can't go anywhere the cards shake (and the phone buzzes, where
+  supported).
+- **Drag** a card to put it somewhere else than the tap would.
+- **Tap the stock** (bottom right; one back per deal left) to deal a row. It
+  refuses while a column is empty — the standard rule.
+- **↶ Undo** is unlimited. **New deal** picks 1, 2, or 4 suits, or restarts.
+- The game auto-saves in the browser. Deals use the engine's own RNG, so
+  `play.html?suits=4&seed=7` is the same deal as `POST /solve {suits:4, seed:7}`.
+- Desktop keys: `Z` undo, `D`/Space deal, `N` new deal.
+
+It shares the solver's deck (four-colour suits, card faces) and move logic
+(`src/game.ts`); its own code lives in `src/play/`. In dev it's at
+http://localhost:5173/play.html (the solver links to it).
+
+**Standalone build:** `npm run build:play` builds just the table into
+`dist-play/`, and folds it into a single self-contained `dist-play/index.html`
+(~165 KB; fonts come from Google Fonts) — upload that one file anywhere.
+
+## Solver
+
+Two modes:
 
 - **Solve a deal** — deal a game by suits + seed, then play the solver's full
   solution move by move.

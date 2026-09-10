@@ -43,7 +43,10 @@ web/        React + TypeScript UI that calls the API (see web/README.md)
 built explicitly (`-p spider-api`). A WASM build could slot in the same way.
 
 A browser UI lives in [`web/`](web/): it deals a game via the API, renders the
-board, and plays the solver's solution move by move.
+board, and plays the solver's solution move by move. It also has a phone-first
+**"just play"** table (`web/play.html`) that deals and plays entirely in the
+browser — no server — using a port of the engine's RNG, so its deals match the
+solver's by seed.
 
 ## HTTP API
 

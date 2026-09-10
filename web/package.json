@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:play": "tsc && vite build --mode play && node scripts/inline-play.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
