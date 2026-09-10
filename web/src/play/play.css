@@ -11,8 +11,9 @@
   --ink: #f5ebe6;
   --muted: #c9a3a7;
   --line: rgba(245, 214, 205, 0.16);
-  --stock: #fbf8f1;
-  --stock-edge: #d9d2c3;
+  --stock: #ffffff;
+  --stock-edge: #b8b2a8;
+  --stock-blocked: #d6d2cb; /* face-up but can't be picked up */
   --suit-black: #1a1a1a;
   --suit-red: #c62828;
   --suit-green: #1b7a3d;
@@ -24,6 +25,8 @@
   --display: 'Bodoni Moda', 'Bodoni 72', Didot, Georgia, serif;
   --index: 'Barlow Condensed', 'Arial Narrow', 'Roboto Condensed', system-ui, sans-serif;
   --ui: Barlow, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  /* Card ranks: a sturdy regular-width sans reads best at phone sizes. */
+  --face: Roboto, 'Helvetica Neue', Arial, system-ui, sans-serif;
 
   /* Set from JS by the table's measured width; these are fallbacks. */
   --cw: 60px;
@@ -143,6 +146,7 @@ button:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
   touch-action: manipulation;
 }
 .pcard.grab { touch-action: none; }
+.pcard.blocked { background: var(--stock-blocked); }
 .pcard.black { color: var(--suit-black); }
 .pcard.red { color: var(--suit-red); }
 .pcard.green { color: var(--suit-green); }
@@ -158,26 +162,34 @@ button:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
   to { opacity: 0; transform: translateY(calc(var(--ch) * -0.3)) scale(0.6); }
 }
 
-/* Index: rank + suit on one line, since only a sliver of a buried card shows. */
-.pcard .idx {
+/* Index: a big rank at top-left and a small suit at top-right — the strip a
+   buried card shows is sized to fit it (see Table's overlap). */
+.pcard .rank {
   position: absolute;
-  top: calc(var(--cw) * 0.03);
-  left: calc(var(--cw) * 0.07);
-  font-family: var(--index);
-  font-weight: 700;
-  font-size: calc(var(--cw) * 0.4);
+  top: 0;
+  left: calc(var(--cw) * 0.06);
+  font-family: var(--face);
+  font-weight: 600;
+  font-size: calc(var(--cw) * 0.56);
   line-height: 1;
   letter-spacing: -0.02em;
   white-space: nowrap;
 }
-.pcard .idx .s { font-size: 0.86em; margin-left: 0.04em; }
+.pcard .rank.ten { left: calc(var(--cw) * 0.02); letter-spacing: -0.09em; }
+.pcard .suit {
+  position: absolute;
+  top: calc(var(--cw) * 0.08);
+  right: calc(var(--cw) * 0.05);
+  font-size: calc(var(--cw) * 0.34);
+  line-height: 1;
+}
 .pcard .pip {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: calc(var(--ch) * 0.06);
+  bottom: calc(var(--ch) * 0.07);
   text-align: center;
-  font-size: calc(var(--cw) * 0.62);
+  font-size: calc(var(--cw) * 0.68);
   line-height: 1;
 }
 

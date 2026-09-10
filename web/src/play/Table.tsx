@@ -29,6 +29,7 @@ type Geometry = {
   height: number; // total table height
 };
 
+const ASPECT = 1.5; // card height / width
 const TOP = 6;
 const BOTTOM = 18;
 const DRAG_SLOP = 8; // px of movement before a press becomes a drag
@@ -39,15 +40,15 @@ function geometry(state: GameState, w: number, h: number): Geometry {
   const pad = narrow ? 4 : 14;
   const gap = narrow ? 3 : w < 900 ? 6 : 10;
   let cw = Math.floor((w - 2 * pad - (COLS - 1) * gap) / COLS);
-  cw = Math.max(26, Math.min(cw, 96, Math.floor((h * 0.22) / 1.4)));
-  const ch = Math.round(cw * 1.4);
+  cw = Math.max(26, Math.min(cw, 96, Math.floor((h * 0.22) / ASPECT)));
+  const ch = Math.round(cw * ASPECT);
   const pitch = cw + gap;
   const left = Math.max(pad, Math.floor((w - (COLS * cw + (COLS - 1) * gap)) / 2));
 
   // Roomy by default; squished below only when a column outgrows the height.
   let up = ch * 0.42;
-  let down = ch * 0.14;
-  const minUp = cw * 0.46; // the index must stay readable on a buried card
+  let down = ch * 0.12;
+  const minUp = cw * 0.56; // the rank (0.56·cw type) must stay readable on a buried card
   const minDown = Math.max(3, ch * 0.05);
   let tallest = 0;
   for (const col of state.columns) {
@@ -298,7 +299,7 @@ export function Table({ state, vanishing, onTap, onDrop, stockEl, reduceMotion, 
             const hintDst = hint !== null && p.col === hint.to && p.index === col.cards.length - 1;
             const cls =
               `pcard${p.faceUp ? ' ' + suitClass(card.suit) : ' down'}` +
-              `${grab ? ' grab' : ''}${gone ? ' vanish' : ''}` +
+              `${grab ? ' grab' : p.faceUp ? ' blocked' : ''}${gone ? ' vanish' : ''}` +
               `${hintSrc ? ' hint-src' : ''}${hintDst ? ' hint-dst' : ''}`;
             return (
               <div
@@ -323,10 +324,8 @@ export function Table({ state, vanishing, onTap, onDrop, stockEl, reduceMotion, 
               >
                 {p.faceUp && (
                   <>
-                    <span className="idx">
-                      {rankName(card.rank)}
-                      <span className="s">{suitSymbol(card.suit)}</span>
-                    </span>
+                    <span className={`rank${card.rank === 10 ? ' ten' : ''}`}>{rankName(card.rank)}</span>
+                    <span className="suit">{suitSymbol(card.suit)}</span>
                     <span className="pip">{suitSymbol(card.suit)}</span>
                   </>
                 )}
