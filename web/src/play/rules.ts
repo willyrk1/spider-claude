@@ -137,6 +137,66 @@ export function autoTarget(state: GameState, from: number, index: number): numbe
 export const canDeal = (state: GameState) =>
   state.stock.length > 0 && state.columns.every((c) => c.cards.length > 0);
 
+// ---- Hints ----
+
+export type Hint = { type: 'move'; from: number; index: number; to: number } | { type: 'deal' };
+
+/**
+ * How useful moving `from[index]` onto `to` is (0 = legal but pointless):
+ * turning up a face-down card or emptying a column matters most, then building
+ * same-suit runs. Taking a card off a parent it's already in sequence with only
+ * counts if it trades an off-suit parent for a same-suit one.
+ */
+function moveValue(state: GameState, from: number, index: number, to: number): number {
+  const col = state.columns[from];
+  const card = col.cards[index];
+  const dest = state.columns[to];
+  const destTop = dest.cards[dest.cards.length - 1];
+  const destSame = destTop !== undefined && destTop.suit === card.suit;
+  const parent = index > col.faceDown ? col.cards[index - 1] : undefined;
+  if (parent && parent.rank === card.rank + 1) {
+    if (parent.suit === card.suit || !destSame) return 0; // a shuffle, not progress
+  }
+  let v = 0;
+  if (index === col.faceDown && col.faceDown > 0) v += 100; // turns a card up
+  if (index === 0) v += 60; // empties a column
+  if (parent) v += 20; // uncovers a playable card it wasn't in sequence with
+  if (destSame) v += 30 + (col.cards.length - index) + suitedRunLen(dest);
+  if (!destTop) v -= 40; // spends an empty column
+  return Math.max(0, v);
+}
+
+/**
+ * Legal moves, best first: useful moves by value, then a deal (if allowed),
+ * then any remaining legal-but-pointless moves. Empty columns are
+ * interchangeable, so only the first is offered as a target.
+ */
+export function hints(state: GameState): Hint[] {
+  const firstEmpty = state.columns.findIndex((c) => c.cards.length === 0);
+  const useful: { h: Hint; v: number }[] = [];
+  const pointless: Hint[] = [];
+  for (let from = 0; from < COLS; from++) {
+    const col = state.columns[from];
+    for (let index = runStart(col); index < col.cards.length; index++) {
+      for (let to = 0; to < COLS; to++) {
+        if (state.columns[to].cards.length === 0 && to !== firstEmpty) continue;
+        if (!canDrop(state, from, index, to)) continue;
+        const h: Hint = { type: 'move', from, index, to };
+        const v = moveValue(state, from, index, to);
+        if (v > 0) useful.push({ h, v });
+        else pointless.push(h);
+      }
+    }
+  }
+  useful.sort((a, b) => b.v - a.v);
+  return [...useful.map((u) => u.h), ...(canDeal(state) ? [{ type: 'deal' } as Hint] : []), ...pointless];
+}
+
+export const sameMove = (a: Move, b: Move) =>
+  a.type === 'deal'
+    ? b.type === 'deal'
+    : b.type === 'tableau' && a.from === b.from && a.to === b.to && a.count === b.count;
+
 export const tableauMove = (state: GameState, from: number, index: number, to: number): Move => ({
   type: 'tableau',
   from,

@@ -1,0 +1,52 @@
+# Publish the "just play" table (web/play.html) to GitHub Pages on every push
+# to master that touches web/. It's a static, server-free build, so Pages can
+# host it as-is; the solver API isn't deployed (yet).
+#
+# One-time setup: repo Settings → Pages → Source: "GitHub Actions".
+name: Deploy play table to Pages
+
+on:
+  push:
+    branches: [master]
+    paths: ['web/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run build:play
+      # Ship only the single-file game as the site root.
+      - run: mkdir -p ../site && cp dist-play/index.html ../site/index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

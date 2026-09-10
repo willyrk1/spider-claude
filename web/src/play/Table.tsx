@@ -15,6 +15,8 @@ type Props = {
   /** The stock pile, so newly dealt cards can fly in from it. */
   stockEl: () => HTMLElement | null;
   reduceMotion: boolean;
+  /** A suggested move to highlight: the stack from `from[index]`, onto `to`. */
+  hint: { from: number; index: number; to: number } | null;
 };
 
 type Geometry = {
@@ -95,7 +97,7 @@ type Drag = {
   pickable: boolean;
 };
 
-export function Table({ state, vanishing, onTap, onDrop, stockEl, reduceMotion }: Props) {
+export function Table({ state, vanishing, onTap, onDrop, stockEl, reduceMotion, hint }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const tableRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState<{ w: number; h: number } | null>(null);
@@ -279,7 +281,11 @@ export function Table({ state, vanishing, onTap, onDrop, stockEl, reduceMotion }
         <div className="table" ref={tableRef} style={vars}>
           {state.columns.map((col, c) =>
             col.cards.length === 0 ? (
-              <div key={`slot-${c}`} className="slot" style={{ left: g.left + c * g.pitch, top: TOP }} />
+              <div
+                key={`slot-${c}`}
+                className={`slot${hint?.to === c ? ' hint-dst' : ''}`}
+                style={{ left: g.left + c * g.pitch, top: TOP }}
+              />
             ) : null,
           )}
           {placed.map((p) => {
@@ -288,9 +294,12 @@ export function Table({ state, vanishing, onTap, onDrop, stockEl, reduceMotion }
             const z = p.index + 1;
             const grab = p.faceUp && canPickUp(col, p.index);
             const gone = vanishing.has(p.id);
+            const hintSrc = hint !== null && p.col === hint.from && p.index >= hint.index;
+            const hintDst = hint !== null && p.col === hint.to && p.index === col.cards.length - 1;
             const cls =
               `pcard${p.faceUp ? ' ' + suitClass(card.suit) : ' down'}` +
-              `${grab ? ' grab' : ''}${gone ? ' vanish' : ''}`;
+              `${grab ? ' grab' : ''}${gone ? ' vanish' : ''}` +
+              `${hintSrc ? ' hint-src' : ''}${hintDst ? ' hint-dst' : ''}`;
             return (
               <div
                 key={p.id}

@@ -1,24 +1,27 @@
 import { useEffect, useRef, useState } from 'react';
 import type { GameState, Move } from '../game';
 import { applyMove, computeStepAnim, suitClass, suitSymbol } from '../game';
-import { autoTarget, canDeal, canDrop, dealGame, randomSeed, tableauMove } from './rules';
+import type { Hint } from './rules';
+import { autoTarget, canDeal, canDrop, dealGame, hints, randomSeed, sameMove, tableauMove } from './rules';
 import { Table } from './Table';
 
-// The casual "just play" mode: a random deal, tap-to-move, unlimited undo. Runs
-// entirely in the browser (no solver server), so it can be hosted anywhere.
+// The casual "just play" mode: a random deal, tap-to-move, unlimited undo/redo,
+// hints. Runs entirely in the browser (no solver server), so it can be hosted
+// anywhere.
 
-type Game = { suits: number; seed: number; moves: Move[]; history: GameState[] };
-type Saved = { suits: number; seed: number; moves: Move[] };
+/** `redo` holds undone moves, the next one to redo last. */
+type Game = { suits: number; seed: number; moves: Move[]; history: GameState[]; redo: Move[] };
+type Saved = { suits: number; seed: number; moves: Move[]; redo?: Move[] };
 
 const STORE = 'spider-play-v1';
 const SUIT_OPTIONS = [1, 2, 4] as const;
 // Built standalone (`vite build --mode play`) there's no solver to link to.
 const WITH_SOLVER = import.meta.env.MODE !== 'play';
 
-function replay(suits: number, seed: number, moves: Move[]): Game {
+function replay(suits: number, seed: number, moves: Move[], redo: Move[] = []): Game {
   const history = [dealGame(suits, seed)];
   for (const m of moves) history.push(applyMove(history[history.length - 1], m));
-  return { suits, seed, moves, history };
+  return { suits, seed, moves, history, redo };
 }
 
 function freshGame(suits: number, seed = randomSeed()): Game {
@@ -51,7 +54,7 @@ function initialGame(): Game {
   }
   if (saved && [1, 2, 4].includes(saved.suits) && Array.isArray(saved.moves)) {
     try {
-      return replay(saved.suits, saved.seed, saved.moves);
+      return replay(saved.suits, saved.seed, saved.moves, Array.isArray(saved.redo) ? saved.redo : []);
     } catch {
       /* corrupt save — fall through */
     }
@@ -82,26 +85,37 @@ export default function Play() {
   const [sheet, setSheet] = useState(false);
   const [toast, setToast] = useState<{ text: string; n: number } | null>(null);
   const [popRun, setPopRun] = useState(0); // which foundation slot (1-based) just filled
+  // The ranked hints for this position and which one is showing; pressing Hint
+  // again steps to the next. Cleared whenever the position changes.
+  const [hint, setHint] = useState<{ list: Hint[]; i: number } | null>(null);
   const timers = useRef<number[]>([]);
   const stockRef = useRef<HTMLButtonElement>(null);
 
   const cur = game.history[game.history.length - 1];
   const shown = frame?.state ?? cur;
   const won = cur.completed === 8;
+  const shownHint = hint ? hint.list[hint.i] : null;
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORE, JSON.stringify({ suits: game.suits, seed: game.seed, moves: game.moves }));
+      localStorage.setItem(
+        STORE,
+        JSON.stringify({ suits: game.suits, seed: game.seed, moves: game.moves, redo: game.redo }),
+      );
     } catch {
       /* private mode etc. — the game just won't survive a reload */
     }
   }, [game]);
+
+  useEffect(() => setHint(null), [cur]);
 
   useEffect(() => {
     if (!toast) return;
     const t = window.setTimeout(() => setToast(null), 1600);
     return () => clearTimeout(t);
   }, [toast]);
+
+  const say = (text: string) => setToast({ text, n: Date.now() });
 
   function settle() {
     timers.current.forEach(clearTimeout);
@@ -112,7 +126,11 @@ export default function Play() {
   function play(m: Move) {
     settle();
     const next = applyMove(cur, m);
-    setGame({ ...game, moves: [...game.moves, m], history: [...game.history, next] });
+    // Replaying the move you'd redo keeps the rest of the redo line; anything
+    // else starts a new line.
+    const top = game.redo[game.redo.length - 1];
+    const redo = top && sameMove(top, m) ? game.redo.slice(0, -1) : [];
+    setGame({ ...game, moves: [...game.moves, m], history: [...game.history, next], redo });
     if (next.completed <= cur.completed) return;
     setPopRun(next.completed);
     if (reduceMotion) return;
@@ -161,10 +179,10 @@ export default function Play() {
   function deal() {
     if (frame) settle();
     if (cur.stock.length === 0) {
-      setToast({ text: 'The stock is empty', n: Date.now() });
+      say('The stock is empty');
       shakeStock();
     } else if (!canDeal(cur)) {
-      setToast({ text: 'Fill every empty column before dealing', n: Date.now() });
+      say('Fill every empty column before dealing');
       shakeStock();
     } else {
       play({ type: 'deal' });
@@ -174,8 +192,31 @@ export default function Play() {
   function undo() {
     settle();
     if (game.moves.length === 0) return;
-    setGame({ ...game, moves: game.moves.slice(0, -1), history: game.history.slice(0, -1) });
+    const last = game.moves[game.moves.length - 1];
+    setGame({
+      ...game,
+      moves: game.moves.slice(0, -1),
+      history: game.history.slice(0, -1),
+      redo: [...game.redo, last],
+    });
     setPopRun(0);
+  }
+
+  function redo() {
+    if (game.redo.length === 0) return;
+    play(game.redo[game.redo.length - 1]);
+  }
+
+  function showHint() {
+    if (frame) settle();
+    const list = hint ? hint.list : hints(cur);
+    if (list.length === 0) {
+      say('No moves left — undo, or start a new deal');
+      return;
+    }
+    const i = hint ? (hint.i + 1) % list.length : 0;
+    setHint({ list, i });
+    if (list[i].type === 'deal') say('Deal a new row');
   }
 
   function newDeal(suits: number) {
@@ -192,14 +233,17 @@ export default function Play() {
     setSheet(false);
   }
 
-  // Desktop shortcuts: Z / Ctrl+Z undo, D or Space deal, N new deal.
-  const keys = useRef({ undo, deal, open: () => setSheet(true), close: () => setSheet(false) });
-  keys.current = { undo, deal, open: () => setSheet(true), close: () => setSheet(false) };
+  // Desktop shortcuts: Z / Ctrl+Z undo, Y / Shift+Z redo, H hint, D or Space
+  // deal, N new deal.
+  const keys = useRef({ undo, redo, deal, showHint, open: () => setSheet(true), close: () => setSheet(false) });
+  keys.current = { undo, redo, deal, showHint, open: () => setSheet(true), close: () => setSheet(false) };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.altKey || e.metaKey) return;
       const k = e.key.toLowerCase();
-      if (k === 'z') keys.current.undo();
+      if (k === 'z') (e.shiftKey ? keys.current.redo : keys.current.undo)();
+      else if (k === 'y') keys.current.redo();
+      else if (k === 'h' && !e.ctrlKey) keys.current.showHint();
       else if ((k === 'd' || k === ' ') && !e.ctrlKey) {
         e.preventDefault();
         keys.current.deal();
@@ -236,6 +280,7 @@ export default function Play() {
         onDrop={onDrop}
         stockEl={() => stockRef.current}
         reduceMotion={reduceMotion}
+        hint={shownHint?.type === 'move' ? shownHint : null}
       />
 
       <footer className="tray" style={{ position: 'relative' }}>
@@ -244,52 +289,61 @@ export default function Play() {
             {toast.text}
           </div>
         )}
-        <div className="runs" aria-label={`${shown.completed} of 8 suits completed`}>
-          <span className="runs-label">Runs {shown.completed}/8</span>
-          <div className="runs-slots">
-            {Array.from({ length: 8 }, (_, i) => {
-              const suit = shown.completedSuits[i];
-              const filled = suit !== undefined;
-              return (
-                <div
-                  key={i}
-                  className={`run-slot${filled ? ` filled ${suitClass(suit)}` : ''}${filled && popRun === i + 1 ? ' pop' : ''}`}
-                >
-                  {filled ? suitSymbol(suit) : ''}
-                </div>
-              );
-            })}
+        <div className="tray-row">
+          <div className="runs" aria-label={`${shown.completed} of 8 suits completed`}>
+            <span className="runs-label">Runs {shown.completed}/8</span>
+            <div className="runs-slots">
+              {Array.from({ length: 8 }, (_, i) => {
+                const suit = shown.completedSuits[i];
+                const filled = suit !== undefined;
+                return (
+                  <div
+                    key={i}
+                    className={`run-slot${filled ? ` filled ${suitClass(suit)}` : ''}${filled && popRun === i + 1 ? ' pop' : ''}`}
+                  >
+                    {filled ? suitSymbol(suit) : ''}
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        </div>
 
-        <div className="middle">
           <span className="moves">
             {game.moves.length}
             <span className="moves-label">moves</span>
           </span>
-          <button className="undo" onClick={undo} disabled={game.moves.length === 0}>
-            ↶ Undo
+
+          <button
+            ref={stockRef}
+            className={`stock${dealsLeft === 0 ? ' empty' : ''}${blocked ? ' blocked' : ''}${shownHint?.type === 'deal' ? ' hint' : ''}`}
+            onClick={deal}
+            aria-label={dealsLeft ? `Deal a row (${dealsLeft} left)` : 'Stock empty'}
+            style={{ width: dealsLeft ? 36 + (dealsLeft - 1) * 7 : 36 }}
+          >
+            {dealsLeft === 0 ? (
+              <span className="stock-empty">empty</span>
+            ) : (
+              <>
+                {Array.from({ length: dealsLeft }, (_, i) => (
+                  <span key={i} className="back" style={{ left: i * 7 }} />
+                ))}
+                <span className="deals-left">{dealsLeft}</span>
+              </>
+            )}
           </button>
         </div>
 
-        <button
-          ref={stockRef}
-          className={`stock${dealsLeft === 0 ? ' empty' : ''}${blocked ? ' blocked' : ''}`}
-          onClick={deal}
-          aria-label={dealsLeft ? `Deal a row (${dealsLeft} left)` : 'Stock empty'}
-          style={{ width: dealsLeft ? 36 + (dealsLeft - 1) * 7 : 36 }}
-        >
-          {dealsLeft === 0 ? (
-            <span className="stock-empty">empty</span>
-          ) : (
-            <>
-              {Array.from({ length: dealsLeft }, (_, i) => (
-                <span key={i} className="back" style={{ left: i * 7 }} />
-              ))}
-              <span className="deals-left">{dealsLeft}</span>
-            </>
-          )}
-        </button>
+        <div className="actions">
+          <button onClick={undo} disabled={game.moves.length === 0}>
+            ↶ Undo
+          </button>
+          <button className="hint-btn" onClick={showHint} disabled={won}>
+            Hint
+          </button>
+          <button onClick={redo} disabled={game.redo.length === 0}>
+            Redo ↷
+          </button>
+        </div>
       </footer>
 
       {sheet && !won && (

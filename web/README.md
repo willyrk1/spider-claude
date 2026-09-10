@@ -16,10 +16,16 @@ browser (no solver server), so it can be hosted on any static host.
 - **Drag** a card to put it somewhere else than the tap would.
 - **Tap the stock** (bottom right; one back per deal left) to deal a row. It
   refuses while a column is empty — the standard rule.
-- **↶ Undo** is unlimited. **New deal** picks 1, 2, or 4 suits, or restarts.
+- **↶ Undo / Redo ↷** are unlimited (a new move clears Redo, unless it's the
+  move Redo would replay).
+- **Hint** shows one good legal move: the stack glows and its destination is
+  outlined (or the stock glows, for a deal). Moves that turn a card up or empty
+  a column rank first, then same-suit builds; press again for the next one.
+- **New deal** picks 1, 2, or 4 suits, or restarts.
 - The game auto-saves in the browser. Deals use the engine's own RNG, so
   `play.html?suits=4&seed=7` is the same deal as `POST /solve {suits:4, seed:7}`.
-- Desktop keys: `Z` undo, `D`/Space deal, `N` new deal.
+- Desktop keys: `Z` undo, `Y`/`Shift+Z` redo, `H` hint, `D`/Space deal, `N`
+  new deal.
 
 It shares the solver's deck (four-colour suits, card faces) and move logic
 (`src/game.ts`); its own code lives in `src/play/`. In dev it's at
@@ -28,6 +34,11 @@ http://localhost:5173/play.html (the solver links to it).
 **Standalone build:** `npm run build:play` builds just the table into
 `dist-play/`, and folds it into a single self-contained `dist-play/index.html`
 (~165 KB; fonts come from Google Fonts) — upload that one file anywhere.
+
+**GitHub Pages:** `.github/workflows/pages.yml` runs that build and publishes
+the single file on every push to `master` that touches `web/` (or on demand
+from the Actions tab). One-time setup: repo **Settings → Pages → Source:
+GitHub Actions**. The site is https://willyrk1.github.io/spider-claude/.
 
 ## Solver
 
